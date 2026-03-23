@@ -24,6 +24,7 @@ import numpy as np
 
 from nvidia_tao_ds.core.logging.logging import logger
 from sklearn.cluster import KMeans
+from threadpoolctl import threadpool_limits
 
 from spatialai_data_utils.constants import FPS
 from spatialai_data_utils.utils.camera_name_utils import get_cam_names_in_scene
@@ -706,9 +707,10 @@ def anchor_initialization(
         current_num_anchor = gt_boxes.shape[0]
         # current_num_anchor will be at least 1 here, because gt_boxes.shape[0] > 0
 
-    clf = KMeans(n_clusters=current_num_anchor, verbose=verbose, n_init='auto')
     logger.info("===========Starting kmeans, please wait.===========")
-    clf.fit(gt_boxes[:, [X, Y, Z]])
+    with threadpool_limits(limits=64, user_api="blas"):
+        clf = KMeans(n_clusters=current_num_anchor, verbose=verbose, n_init='auto')
+        clf.fit(gt_boxes[:, [X, Y, Z]])
     anchor = np.zeros((current_num_anchor, 11))
     anchor[:, [X, Y, Z]] = clf.cluster_centers_
     anchor[:, [W, L, H]] = np.log(gt_boxes[:, [W, L, H]].mean(axis=0))

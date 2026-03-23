@@ -2,7 +2,7 @@
 Cython==3.0.12
 fairscale==0.4.13
 fvcore==0.1.5.post20221221
-git+https://github.com/openai/CLIP.git # OpenAI CLIP
+# OpenAI CLIP installed separately in Dockerfile (requires --no-build-isolation for Python 3.12+)
 h5py==3.15.1
 lightning_fabric==2.5.0.post0
 matplotlib==3.10.0
@@ -19,7 +19,7 @@ seaborn==0.13.2
 shapely==2.0.7
 timm==1.0.15
 torchmetrics>=0.4.1rc0
-transformers==4.48.3
+transformers==4.57.6
 wandb==0.23.0
 
 # API
@@ -30,6 +30,7 @@ flask_limiter==3.10.1
 marshmallow==3.26.1
 marshmallow_enum==1.5.1
 requests==2.32.3
+urllib3==2.6.3
 
 # Utilities
 apache-libcloud==3.8.0
@@ -43,6 +44,9 @@ omegaconf==2.3.0
 prettytable==3.14.0
 pynvml==12.0.0
 ujson==5.10.0
+
+# Security
+Pillow==12.1.1
 
 # Dev
 pydocstyle==6.3.0
