@@ -17,10 +17,17 @@
 import os
 import sys
 
-from nvidia_tao_core.config.annotations.default_config import ExperimentConfig
-from nvidia_tao_ds.annotations.conversion.mapping import CONVERSION_MAPPING
-from nvidia_tao_ds.core.decorators import monitor_status
-from nvidia_tao_ds.core.hydra.hydra_runner import hydra_runner
+# Cap OPENBLAS threads before numpy is imported — OpenBLAS allocates thread metadata at library
+# load time, so this must be set before any downstream import triggers numpy initialization.
+# Caps to min(user_value, available_cpus, 64) to handle both >128-core systems (e.g. GH200)
+# and machines where fewer CPUs are available than the requested thread count.
+_n_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count()
+os.environ["OPENBLAS_NUM_THREADS"] = str(min(int(os.environ.get("OPENBLAS_NUM_THREADS", 64)), _n_cpus, 64))
+
+from nvidia_tao_core.config.annotations.default_config import ExperimentConfig  # noqa: E402
+from nvidia_tao_ds.annotations.conversion.mapping import CONVERSION_MAPPING  # noqa: E402
+from nvidia_tao_ds.core.decorators import monitor_status  # noqa: E402
+from nvidia_tao_ds.core.hydra.hydra_runner import hydra_runner  # noqa: E402
 
 
 @hydra_runner(

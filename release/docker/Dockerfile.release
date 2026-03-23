@@ -1,7 +1,7 @@
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
-ARG ARM64_DIGEST=378ab65cb05fa9b4b461c628d504ee3c56ae7c234a598739e0091547b84feedf
-ARG X86_DIGEST=b9a95c1ee89489293e07dd344c6c78903e4c2344c7f27ce44468830fc53c8719
+ARG ARM64_DIGEST=9386d1c7650aff45efdbc678ac50fe0451a49cf187e235354357a2024f2c1427
+ARG X86_DIGEST=03ec11b628eca9a5779c98d3b1dac9d7fb4c2386b3e6865096d8dbf250de95a0
 
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${ARM64_DIGEST} AS base-arm64
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${X86_DIGEST} AS base-amd64
@@ -29,10 +29,22 @@ RUN apt-get update && \
     apt --only-upgrade install libc-dev-bin -y && \
     apt --only-upgrade install libcurl3-gnutls -y && \
     apt --only-upgrade install libcurl4 -y && \
-    apt --only-upgrade install libcurl4-openssl-dev -y
+    apt --only-upgrade install libcurl4-openssl-dev -y && \
+    apt --only-upgrade install keyboxd -y && \
+    apt --only-upgrade install gpgv -y && \
+    apt --only-upgrade install gpgsm -y && \
+    apt --only-upgrade install gpgconf -y && \
+    apt --only-upgrade install gpg-agent -y
 
 RUN pip install --upgrade pip && \
     python -m pip install --upgrade Werkzeug==3.0.1
+
+# Installing PyTorch
+COPY tao-pytorch tao-pytorch
+RUN export WORKSPACE=/opt/nvidia/tao-pytorch && \
+    cd tao-pytorch && bash release/docker/build_wheel.sh && \
+    find dist/ -name "nvidia_tao_pytorch*.whl" -type f | xargs -n 1 pip install && \
+    cd .. && rm -rf tao-pytorch
 
 # Installing TAO-Core
 COPY tao-core tao-core
