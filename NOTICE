@@ -1,0 +1,219 @@
+NVIDIA TAO Data Services
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (see the LICENSE file in
+the root of this repository or https://www.apache.org/licenses/LICENSE-2.0).
+
+================================================================================
+Third-Party Software Notices and Attributions
+================================================================================
+
+This product bundles, embeds, or is derived from third-party software. The
+attribution notices below are provided in compliance with Section 4(d) of the
+Apache License, Version 2.0, and with the redistribution/attribution terms of
+the upstream licenses listed for each component.
+
+Each third-party component remains subject to its own license. In the event of
+any conflict, the third-party license terms govern that component's use,
+reproduction, and distribution.
+
+--------------------------------------------------------------------------------
+1. PyTorch Image Models (timm)
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/rwightman/pytorch-image-models
+Author:    Ross Wightman
+License:   Apache License, Version 2.0
+Used in:   nvidia_tao_ds/backbone/swin_utils.py
+           nvidia_tao_ds/backbone/convnext_utils.py
+           nvidia_tao_ds/backbone/fan.py
+           nvidia_tao_ds/backbone/vision_transformer.py
+
+Portions of the backbone implementations are copied or adapted from the timm
+library:
+
+    Copyright 2019-2022, Ross Wightman
+    Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+2. Swin Transformer
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/microsoft/Swin-Transformer
+Authors:   Microsoft Corporation (written by Ze Liu)
+License:   MIT License
+Used in:   nvidia_tao_ds/backbone/swin_utils.py
+
+Code and pretrained weight URLs are derived from the Microsoft Swin Transformer
+project:
+
+    Swin Transformer
+    Copyright (c) 2021 Microsoft
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to
+    deal in the Software without restriction, including without limitation the
+    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+    sell copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+    IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+3. ConvNeXt
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/facebookresearch/ConvNeXt
+Authors:   Meta Platforms, Inc. and affiliates
+License:   MIT License
+Used in:   nvidia_tao_ds/backbone/convnext_utils.py
+
+Portions of the ConvNeXt backbone implementation and pretrained weight URLs are
+derived from Meta's ConvNeXt project:
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+    Licensed under the MIT License.
+
+--------------------------------------------------------------------------------
+4. NVIDIA FAN (Fully Attentional Networks)
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/NVlabs/FAN
+Authors:   NVIDIA Corporation, NVlabs
+License:   NVIDIA Source Code License-NC
+           (https://github.com/NVlabs/FAN/blob/main/LICENSE)
+Used in:   nvidia_tao_ds/backbone/fan.py
+           nvidia_tao_ds/backbone/swin_utils.py
+           nvidia_tao_ds/backbone/convnext_utils.py
+
+Portions are derived from the NVlabs FAN project. The FAN-derived portions are
+provided under the NVIDIA Source Code License-NC; the surrounding NVIDIA
+modifications are provided under Apache-2.0 as noted in the file headers. See
+https://github.com/NVlabs/FAN/blob/main/LICENSE for the upstream terms.
+
+--------------------------------------------------------------------------------
+5. DINO (self-DIstillation with NO labels) / vision_transformer
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/facebookresearch/dino
+Authors:   Meta Platforms, Inc. and affiliates
+License:   Apache License, Version 2.0
+Used in:   nvidia_tao_ds/backbone/vision_transformer.py
+
+Portions of the Vision Transformer / positional-embedding interpolation code
+are copy-pasted or adapted from Facebook's DINO project:
+
+    Copyright 2021 Facebook, Inc. and its affiliates.
+    Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+6. XCiT (Cross-Covariance Image Transformers)
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/facebookresearch/xcit
+Authors:   Meta Platforms, Inc. and affiliates
+License:   Apache License, Version 2.0
+Used in:   nvidia_tao_ds/backbone/swin_utils.py (positional encoding)
+
+Portions of the positional-encoding implementation are based on the official
+XCiT code:
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+    Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+7. Horovod (MPI rank/size environment helpers)
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/horovod/horovod
+Authors:   Uber Technologies, Inc., The Linux Foundation
+License:   Apache License, Version 2.0
+Used in:   nvidia_tao_ds/augmentation/utils/distributed_utils.py
+
+The `mpi_env_MPI_rank_and_size` helper is derived from Horovod's test utilities:
+
+    Copyright 2017 Uber Technologies, Inc.
+    Modifications copyright (C) 2019, NVIDIA CORPORATION.
+    Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+8. Grounding DINO
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/IDEA-Research/GroundingDINO
+Authors:   IDEA-Research
+License:   Apache License, Version 2.0
+Used in:   nvidia_tao_ds/auto_label/grounding_dino/ (auto-label inference glue,
+           tokenization helpers, plotting utilities). Core model code is
+           consumed via the `nvidia_tao_pytorch` submodule, which carries its
+           own NOTICE/LICENSE.
+
+Portions of the autolabel pipeline integrate components derived from
+Grounding DINO:
+
+    Copyright 2023 IDEA-Research
+    Licensed under the Apache License, Version 2.0.
+
+--------------------------------------------------------------------------------
+9. MAL (Mask Auto-Labeler)
+--------------------------------------------------------------------------------
+
+Origin:    https://github.com/NVlabs/mask-auto-labeler
+Authors:   NVIDIA Corporation, NVlabs
+License:   NVIDIA Source Code License-NC
+Used in:   nvidia_tao_ds/auto_label/mal/ (inference glue). Core model code is
+           consumed via the `nvidia_tao_pytorch` submodule, which carries its
+           own NOTICE/LICENSE.
+
+    Copyright (c) 2023, NVIDIA Corporation. All rights reserved.
+
+================================================================================
+Bundled Submodules
+================================================================================
+
+This repository declares the following git submodules in `.gitmodules`. They
+are independently maintained NVIDIA repositories, distributed under their own
+LICENSE/NOTICE files within each submodule's tree:
+
+    tao-core      (NVIDIA TAO Toolkit core utilities)
+    tao-pytorch   (NVIDIA TAO PyTorch model implementations)
+
+Refer to the LICENSE and NOTICE files within each submodule, when initialized,
+for attribution of the third-party software they vendor.
+
+================================================================================
+Bundled Python Wheels (CI / Release Artifacts)
+================================================================================
+
+The release/CI tooling under `Jenkinsfile.nightly` and `docker/` packages a set
+of upstream Python wheels (declared in `docker/requirements-pip.txt`) into
+release containers. Those wheels are not stored in this source repository, but
+when redistributed as part of a release artifact they remain subject to their
+upstream licenses. Representative components include (non-exhaustive):
+
+    accelerate, cudf, cuml, h5py, lightning_fabric, mpi4py, opencv-python-headless,
+    open-clip-torch, pycocotools, pyfacer, pytorch_lightning, scikit-image, timm,
+    transformers, wandb, Cython, matplotlib, nvidia-dali, nvidia-nvjpeg2k, pandas,
+    pyarrow, pytest, toml, fvcore, fairscale, torchmetrics, shapely, seaborn,
+    google-genai, openai, apispec, apispec_webframeworks, flask, flask_limiter,
+    marshmallow, marshmallow_enum, marshmallow-oneofschema, ruamel.yaml, orjson,
+    pymongo, validators, timeloop, kubernetes, ngcsdk, leptonai, hydra-core,
+    imagesize, omegaconf, prettytable, pynvml, ujson, pydocstyle, flake8,
+    pyflakes, pylint, pytest-order, pyinstaller.
+
+Each wheel is distributed under its own license. Their NOTICE files (where
+present) are reproduced inside the wheels themselves and are surfaced with the
+release container distribution; see the corresponding upstream projects for
+authoritative attribution.
+
+================================================================================
+End of NOTICE
+================================================================================

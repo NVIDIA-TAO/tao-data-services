@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Update source-backed command tables in README.md."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+
+BEGIN = "<!-- BEGIN GENERATED: supported-commands -->"
+END = "<!-- END GENERATED: supported-commands -->"
+
+
+@dataclass(frozen=True)
+class ConsoleScript:
+    """Console script entry parsed from setup.py."""
+
+    command: str
+    target: str
+    subtasks: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LauncherOption:
+    """Long-form tao_ds launcher option parsed from runner/tao_ds.py."""
+
+    option: str
+    default: str
+    help_text: str
+
+
+def _literal(node: ast.AST) -> object:
+    """Return a Python literal when possible."""
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, SyntaxError):
+        return None
+
+
+def _as_md(value: object) -> str:
+    """Format values for Markdown tables."""
+    if value is None:
+        return "`None`"
+    if value == "":
+        return "empty string"
+    if value == []:
+        return "`[]`"
+    if isinstance(value, bool):
+        return f"`{str(value)}`"
+    return f"`{value}`"
+
+
+def _escape(value: str) -> str:
+    """Escape pipe characters in Markdown table cells."""
+    return value.replace("|", "\\|")
+
+
+def parse_console_scripts(setup_py: Path, repo_root: Path) -> list[ConsoleScript]:
+    """Parse setup.py console_scripts without importing setup.py."""
+    tree = ast.parse(setup_py.read_text(encoding="utf-8"), filename=str(setup_py))
+    entries: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "console_scripts":
+                literal = _literal(value)
+                if isinstance(literal, list):
+                    entries.extend(item for item in literal if isinstance(item, str))
+
+    scripts = []
+    for entry in sorted(entries):
+        command, target = entry.split("=", 1)
+        module, _, _ = target.partition(":")
+        scripts.append(
+            ConsoleScript(
+                command=command,
+                target=target,
+                subtasks=tuple(discover_script_subtasks(module, repo_root)),
+            )
+        )
+    return scripts
+
+
+def discover_script_subtasks(module: str, repo_root: Path) -> list[str]:
+    """Discover subtask modules adjacent to a console entrypoint package."""
+    parts = module.split(".")
+    if "entrypoint" not in parts:
+        return []
+    package_parts = parts[: parts.index("entrypoint")]
+    scripts_dir = repo_root.joinpath(*package_parts, "scripts")
+    if not scripts_dir.exists():
+        return []
+    return sorted(
+        path.stem
+        for path in scripts_dir.glob("*.py")
+        if path.name != "__init__.py" and not path.name.startswith(".")
+    )
+
+
+def parse_launcher_options(runner_py: Path) -> list[LauncherOption]:
+    """Parse long tao_ds argparse options from runner/tao_ds.py."""
+    tree = ast.parse(runner_py.read_text(encoding="utf-8"), filename=str(runner_py))
+    options = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_argument":
+            continue
+
+        names = [_literal(arg) for arg in node.args]
+        long_names = [name for name in names if isinstance(name, str) and name.startswith("--")]
+        if not long_names:
+            continue
+
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+        default = _literal(keywords["default"]) if "default" in keywords else None
+        action = _literal(keywords["action"]) if "action" in keywords else None
+        help_text = _literal(keywords["help"]) if "help" in keywords else ""
+        if action == "store_true" and default is None:
+            default = False
+        if action == "store_false" and default is None:
+            default = True
+
+        options.append(
+            LauncherOption(
+                option=", ".join(long_names),
+                default=_as_md(default),
+                help_text=str(help_text or ""),
+            )
+        )
+    return options
+
+
+def render_generated_section(repo_root: Path) -> str:
+    """Render the generated README section."""
+    console_scripts = parse_console_scripts(repo_root / "setup.py", repo_root)
+    launcher_options = parse_launcher_options(repo_root / "runner" / "tao_ds.py")
+    manifest = json.loads((repo_root / "docker" / "manifest.json").read_text(encoding="utf-8"))
+
+    lines = [
+        BEGIN,
+        "## Supported Commands",
+        "",
+        "Generated by `python tools/update_readme_supported_commands.py` from",
+        "`setup.py`, `runner/tao_ds.py`, and `docker/manifest.json`.",
+        "",
+        "### `tao_ds` Container Launcher",
+        "",
+        "`scripts/envsetup.sh` exports `tao_ds` as a shell function that runs",
+        "`runner/tao_ds.py`. Commands after `--` execute inside the container.",
+        "",
+        "| Option | Default | Purpose |",
+        "| :--- | :--- | :--- |",
+    ]
+    for option in launcher_options:
+        lines.append(f"| `{_escape(option.option)}` | {option.default} | {_escape(option.help_text)} |")
+
+    lines.extend(
+        [
+            "",
+            "### In-Container Console Scripts",
+            "",
+            "These entrypoints are installed by the `nvidia-tao-ds` package. Script",
+            "subtasks are discovered from each command package's `scripts/` directory.",
+            "",
+            "| Command | Python entry point | Script subtasks |",
+            "| :--- | :--- | :--- |",
+        ]
+    )
+    for script in console_scripts:
+        subtasks = "<br>".join(f"`{subtask}`" for subtask in script.subtasks) or "`None`"
+        lines.append(f"| `{script.command}` | `{script.target}` | {subtasks} |")
+
+    registry = manifest["registry"]
+    repository = manifest["repository"]
+    lines.extend(
+        [
+            "",
+            "### Base Image Source",
+            "",
+            "`runner/tao_ds.py` and `ci/utils.py` resolve the immutable base image from",
+            "`docker/manifest.json`, choosing the digest for the host architecture.",
+            "",
+            "| Architecture | Image reference |",
+            "| :--- | :--- |",
+        ]
+    )
+    if "digests" in manifest:
+        for arch, digest in sorted(manifest["digests"].items()):
+            lines.append(f"| `{arch}` | `{registry}/{repository}@{digest}` |")
+    else:
+        lines.append(f"| all | `{registry}/{repository}@{manifest['digest']}` |")
+
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def update_readme(readme: Path, generated: str, check: bool) -> bool:
+    """Update or check README.md generated content."""
+    original = readme.read_text(encoding="utf-8")
+    if BEGIN not in original or END not in original:
+        raise RuntimeError(f"{readme} is missing generated section markers")
+    before, rest = original.split(BEGIN, 1)
+    _, after = rest.split(END, 1)
+    updated = before.rstrip() + "\n\n" + generated + after
+    if original == updated:
+        return False
+    if check:
+        raise SystemExit(
+            "README.md generated command section is stale. "
+            "Run `python tools/update_readme_supported_commands.py`."
+        )
+    readme.write_text(updated, encoding="utf-8")
+    return True
+
+
+def main() -> None:
+    """CLI entrypoint."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="Fail if README.md is stale.")
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    generated = render_generated_section(repo_root)
+    changed = update_readme(repo_root / "README.md", generated, args.check)
+    if changed:
+        print("Updated README.md generated command section.")
+    else:
+        print("README.md generated command section is up to date.")
+
+
+if __name__ == "__main__":
+    main()

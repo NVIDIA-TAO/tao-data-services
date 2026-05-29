@@ -1,9 +1,0 @@
-dataset:
-  input_dir: "/workspace/nvidia_tao_ds/skin_tone/test_imgs"
-  image_size: 448
-
-color_aug:
-  hue:
-    angle: 30
-  lum:
-    offset: 20

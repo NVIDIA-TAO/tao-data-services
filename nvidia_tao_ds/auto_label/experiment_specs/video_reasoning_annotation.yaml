@@ -1,0 +1,48 @@
+results_dir: ???
+autolabel_type: "video_reasoning_annotation"
+
+video_reasoning_annotation:
+  vlm:
+    backend: "gemini"
+    gemini:
+      api_key: ""    # Set GOOGLE_API_KEY env var or fill in here
+      model: "gemini-3.1-flash-lite-preview"
+      media_resolution: "MEDIA_RESOLUTION_LOW"   # Optional: MEDIA_RESOLUTION_LOW/MEDIUM/HIGH or omit for default
+      temperature: 0.3
+      max_output_tokens: 8192
+      timeout: 120
+
+  llm:
+    backend: "gemini"
+    gemini:
+      api_key: ""    # Set GOOGLE_API_KEY env var or fill in here
+      model: "gemini-3.1-flash-lite-preview"
+      temperature: 0.3
+      max_output_tokens: 8192
+      timeout: 120
+
+  workflow:
+    steps: ["0", "1a", "1b", "1c", "2", "3", "4"]
+    mode: "auto"           # "auto" (VLM classifies each video), "anomaly", or "normal"
+    max_workers: 4
+    max_video_length_sec: 300
+    chunk_duration_options: [5, 10, 15, 20, 30]
+    max_chunks: 10
+    highlight_before_sec: 3.0
+    highlight_after_sec: 3.0
+    long_video_threshold_sec: 60
+    long_video_sample_fps: 0.5
+    long_video_max_frames: 60
+    qa_types: ["mcq", "bcq", "open_qa", "causal_linkage", "temporal_localization", "temporal_event_desc", "scene_description", "event_summary"]
+
+  # Input data: provide video_root, input_jsonl_files, or both (lists are merged).
+  # JSONL format: one JSON object per line with {"video_path": "/path/to/video.mp4"}.
+  # The "video" key is also accepted. Additional fields are allowed.
+  data:
+    video_root: ""         # Root directory containing video files (walked recursively)
+    input_jsonl_files: []  # Optional list of JSONL files with video paths
+    filter_field: null     # Optional: boolean field name to filter JSONL entries
+
+  license: ""              # Optional: written to metadata.license in step 4 outputs
+  description_extra: ""    # Optional: extra text appended to per-task descriptions in step 4 outputs
+  prompts_module: ""       # Optional: custom prompts module path

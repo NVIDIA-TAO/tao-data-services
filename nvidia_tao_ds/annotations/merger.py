@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Annotation Merger."""
 from abc import ABC, abstractmethod
@@ -91,6 +80,61 @@ class COCOMerger(Merger):
 
         # verfiy output json
         assert COCO(output_path)
+
+
+class LLaVAMerger(Merger):
+    """LLaVA annotation Merger class.
+
+    Merges multiple LLaVA-format JSON annotation files (each a JSON array
+    of {id, video, conversations} objects) into a single file.
+
+    Args:
+        annotation_list: List of paths to LLaVA JSON annotation files.
+        on_duplicate: How to handle duplicate ids across files.
+            "error" (default): raise ValueError on duplicate ids.
+            "skip": keep the first occurrence, skip duplicates with a warning.
+            "keep": keep all entries, even if ids are duplicated.
+    """
+
+    VALID_ON_DUPLICATE = ("error", "skip", "keep")
+
+    def __init__(self, annotation_list, on_duplicate="error"):
+        """Init."""
+        assert annotation_list and isinstance(annotation_list, list), "Annotation list is empty!"
+        if on_duplicate not in self.VALID_ON_DUPLICATE:
+            raise ValueError(
+                f"Invalid on_duplicate={on_duplicate!r}. "
+                f"Must be one of {self.VALID_ON_DUPLICATE}"
+            )
+        self.annotation_list = annotation_list
+        self.on_duplicate = on_duplicate
+        self.json_list = []
+        for path in self.annotation_list:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            assert isinstance(data, list), f"Expected JSON array in {path}"
+            logger.info(f"{path} contains {len(data)} annotations")
+            self.json_list.append(data)
+
+    def merge(self, output_path):
+        """Merge LLaVA JSON annotation files."""
+        merged = []
+        seen_ids = set()
+        for annotations in self.json_list:
+            for entry in annotations:
+                entry_id = entry.get("id")
+                if entry_id in seen_ids:
+                    if self.on_duplicate == "error":
+                        raise ValueError(f"Duplicate id {entry_id!r} found across annotation files")
+                    if self.on_duplicate == "skip":
+                        logger.warning(f"Duplicate id {entry_id!r} found, skipping")
+                        continue
+                seen_ids.add(entry_id)
+                merged.append(entry)
+
+        logger.info(f"Writing {len(merged)} annotations to {output_path}")
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
 
 
 class ODVGMerger(Merger):
