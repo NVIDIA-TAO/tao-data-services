@@ -1,187 +1,162 @@
-# TAO Toolkit - Data services
+# TAO Toolkit - Data Services
 
-<!-- vscode-markdown-toc -->
-* [Overview](#Overview)
-* [Getting Started](#GettingStarted)
-	* [Requirements](#Requirements)
-		* [Hardware Requirements](#HardwareRequirements)
-		* [Software Requirements](#SoftwareRequirements)
-	* [Instantiating the development container](#Instantiatingthedevelopmentcontainer)
-	* [Updating the base docker](#Updatingthebasedocker)
-		* [Build base docker](#Buildbasedocker)
-		* [Test the newly built base docker](#Testthenewlybuiltbasedocker)
-		* [Update the new docker](#Updatethenewdocker)
-* [Building a release container](#Buildingareleasecontainer)
-* [Contribution Guidelines](#ContributionGuidelines)
-* [License](#License)
+TAO Data Services contains the source for data annotation, augmentation,
+auto-labeling, analytics, mining, image validation, and the lightweight API
+service used by NVIDIA TAO workflows.
 
-<!-- vscode-markdown-toc-config
-	numbering=false
-	autoSave=true
-	/vscode-markdown-toc-config -->
-<!-- /vscode-markdown-toc -->
+This repository builds the `nvidia-tao-ds` Python package and the TAO Data
+Services containers. The developer launcher is `tao_ds`; the package console
+scripts run inside that container after the source tree is mounted at
+`/workspace`.
 
-## <a name='Overview'></a>Overview
+## Contents
 
-TAO Toolkit is a Python package hosted on the NVIDIA Python Package Index. It interacts with lower-level TAO dockers available from the NVIDIA GPU Accelerated Container Registry (NGC). The TAO containers come pre-installed with all dependencies required for training. The output of the TAO workflow is a trained model that can be deployed for inference on NVIDIA devices using DeepStream, TensorRT and Triton.
+* [Start Here](#start-here)
+* [Source Layout](#source-layout)
+* [Requirements](#requirements)
+* [Supported Commands](#supported-commands)
+* [Container Builds](#container-builds)
+* [Contributing](#contributing)
+* [License](#license)
 
-This repository contains the required implementation to facilitate data annotation, augmentation, labeling and analytics. These routines are packaged as part of the TAO Toolkit Data-services container in the Toolkit package.
-
-## <a name='GettingStarted'></a>Getting Started
-
-As soon as the repository is cloned, run the `envsetup.sh` file to check
-if the build environment has the necessary dependencies, and the required
-environment variables are set.
+## Start Here
 
 ```sh
 source scripts/envsetup.sh
+tao_ds --gpus all --volume /data/tao:/data
+tao_ds -- make build
 ```
 
-We recommend adding this command to your local `~/.bashrc` file, so that every new terminal instance receives this.
+Use `docs/index.md` as the detailed source map. It links to architecture,
+workflow, testing, container, and extension guides for maintainers, coding
+agents, and container power users.
 
-### <a name='Requirements'></a>Requirements
-
-#### <a name='HardwareRequirements'></a>Hardware Requirements
-
-##### Minimum system configuration
-
-* 8 GB system RAM
-* 4 GB of GPU RAM
-* 8 core CPU
-* 1 NVIDIA GPU
-* 100 GB of SSD space
-
-##### Recommended system configuration
-
-* 32 GB system RAM
-* 32 GB of GPU RAM
-* 8 core CPU
-* 1 NVIDIA GPU
-* 100 GB of SSD space
-
-#### <a name='SoftwareRequirements'></a>Software Requirements
-
-| **Software**                     | **Version** |
+| Need | Document |
 | :--- | :--- |
-| Ubuntu LTS                       | >=18.04     |
-| python                           | >=3.8.x     |
-| docker-ce                        | >19.03.5    |
-| docker-API                       | 1.40        |
-| `nvidia-container-toolkit`       | >1.3.0-1    |
-| nvidia-container-runtime         | 3.4.0-1     |
-| nvidia-docker2                   | 2.5.0-1     |
-| nvidia-driver                    | >525.85     |
-| python-pip                       | >21.06      |
+| Repository map and first-pass commands | [docs/agent_onboarding.md](docs/agent_onboarding.md) |
+| Command, config, API, and package flow | [docs/architecture.md](docs/architecture.md) |
+| Common source-change recipes | [docs/development_workflows.md](docs/development_workflows.md) |
+| Test selection and debugging notes | [docs/testing_and_debugging.md](docs/testing_and_debugging.md) |
+| Launcher, mounts, GPU, and image details | [docs/container_power_users.md](docs/container_power_users.md) |
+| Adding a new data-service command | [docs/new_data_service_command.md](docs/new_data_service_command.md) |
 
-### <a name='Instantiatingthedevelopmentcontainer'></a>Instantiating the development container
+## Source Layout
 
-In order to maintain a uniform development environment across all users, TAO Toolkit provides a base environment docker that has been built and uploaded to NGC for the developers. For instantiating the docker, simply run the `tao_ds` CLI. The usage for the command line launcher is mentioned below.
+| Path | Purpose |
+| :--- | :--- |
+| `nvidia_tao_ds/` | Main package for CLI subtasks, configs, shared utilities, API service, and data-service domains. |
+| `runner/tao_ds.py` | Host-side Docker launcher used by the `tao_ds` shell function from `scripts/envsetup.sh`. |
+| `docker/` | Base development image Dockerfile, requirements, build script, and digest manifest. |
+| `release/` | Python package metadata plus release-container build scripts. |
+| `ci/` and `.gitlab-ci.yml` | Static-test helpers and merge-request pipeline wiring. |
+| `tests/` | Unit and integration-style tests for conversion, analytics, auto-label, mining, and config behavior. |
+| `tao-core/`, `tao-pytorch/` | In-repo submodules used by local development and container builds. |
+
+## Requirements
+
+| Software | Version |
+| :--- | :--- |
+| Ubuntu LTS | `>=18.04` |
+| Python | `>=3.8.x` |
+| Docker CE | `>19.03.5` |
+| Docker API | `1.40` |
+| `nvidia-container-toolkit` | `>1.3.0-1` |
+| NVIDIA container runtime | `3.4.0-1` |
+| `nvidia-docker2` | `2.5.0-1` |
+| NVIDIA driver | `>525.85` |
+| `python-pip` | `>21.06` |
+
+Minimum hardware is 8 GB system RAM, 4 GB GPU RAM, 8 CPU cores, one NVIDIA GPU,
+and 100 GB SSD space. Recommended hardware is 32 GB system RAM and 32 GB GPU
+RAM.
+
+<!-- BEGIN GENERATED: supported-commands -->
+## Supported Commands
+
+Generated by `python tools/update_readme_supported_commands.py` from
+`setup.py`, `runner/tao_ds.py`, and `docker/manifest.json`.
+
+### `tao_ds` Container Launcher
+
+`scripts/envsetup.sh` exports `tao_ds` as a shell function that runs
+`runner/tao_ds.py`. Commands after `--` execute inside the container.
+
+| Option | Default | Purpose |
+| :--- | :--- | :--- |
+| `--gpus` | `all` | Comma separated GPU indices to be exposed to the docker. |
+| `--volume` | `[]` | Volumes to bind. |
+| `--env` | `[]` | Environment variables to bind. |
+| `--mounts_file` | empty string | Path to the mounts file. |
+| `--shm_size` | `16G` | Shared memory size for docker |
+| `--run_as_user` | `False` | Flag to run as user |
+| `--tag` | `None` | The tag value for the local dev docker. |
+| `--ulimit` | `None` | Docker ulimits for the host machine. |
+| `--run_as_service` | `False` | Flag to run as a microservice |
+| `--ip` | `0.0.0.0` | Microservice ip address (e.g. 0.0.0.0). |
+| `--port` | `8000` | Microservice port (e.g. 8000). |
+| `--port_mapping` | `8000` | Port mapping for the micorservices port (e.g. 8000). |
+| `--no-tty` | `True` | Set TTY |
+
+### In-Container Console Scripts
+
+These entrypoints are installed by the `nvidia-tao-ds` package. Script
+subtasks are discovered from each command package's `scripts/` directory.
+
+| Command | Python entry point | Script subtasks |
+| :--- | :--- | :--- |
+| `analytics` | `nvidia_tao_ds.data_analytics.entrypoint.analytics:main` | `analyze`<br>`kpi_analyze`<br>`validate` |
+| `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice` |
+| `augmentation` | `nvidia_tao_ds.augmentation.entrypoint.augment:main` | `generate` |
+| `auto_label` | `nvidia_tao_ds.auto_label.entrypoint.auto_label:main` | `generate` |
+| `embedding` | `nvidia_tao_ds.mining.embedding.entrypoint.embedding:main` | `image_embeddings` |
+| `gap_analysis` | `nvidia_tao_ds.rcca.gap_analysis.entrypoint.gap_analysis:main` | `vcn_aoi`<br>`vlm_bcq` |
+| `image` | `nvidia_tao_ds.image.entrypoint.image:main` | `validate` |
+| `tmm` | `nvidia_tao_ds.mining.tmm.entrypoint.tmm:main` | `nearest_neighbors` |
+
+### Base Image Source
+
+`runner/tao_ds.py` and `ci/utils.py` resolve the immutable base image from
+`docker/manifest.json`, choosing the digest for the host architecture.
+
+| Architecture | Image reference |
+| :--- | :--- |
+| `arm` | `nvcr.io/nvstaging/tao/data_services_base_image@sha256:6e1e6809807ed838c7617183c3338b59764b088dd6983bd07abafb29d7f45013` |
+| `x86` | `nvcr.io/nvstaging/tao/data_services_base_image@sha256:aa3f3ecfdeec137f081f86e2876fdf17deb757cdb5a808beb58ddfb959738f5f` |
+<!-- END GENERATED: supported-commands -->
+
+## Container Builds
+
+The base development image is defined by `docker/Dockerfile`, Python
+requirements live in `docker/requirements-pip.txt`, and immutable image digests
+live in `docker/manifest.json`.
 
 ```sh
-usage: tao_ds [-h] [--gpus GPUS] [--volume VOLUME] [--env ENV] [--mounts_file MOUNTS_FILE] [--shm_size SHM_SIZE] [--run_as_user] [--tag TAG] [--ulimit ULIMIT]
-
-Tool to run the TAO Toolkit Data-services container.
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --gpus GPUS           Comma separated GPU indices to be exposed to the docker.
-  --volume VOLUME       Volumes to bind.
-  --env ENV             Environment variables to bind.
-  --mounts_file MOUNTS_FILE
-                        Path to the mounts file.
-  --shm_size SHM_SIZE   Shared memory size for docker
-  --run_as_user         Flag to run as user
-  --tag TAG             The tag value for the local dev docker.
-  --ulimit ULIMIT       Docker ulimits for the host machine.
-
-```
-
-A sample command to instantiate an interactive session in the base development docker is mentioned below.
-
-```sh
-tao_ds --gpus all --volume /path/to/data/on/host:/path/to/data/on/container --volume /path/to/results/on/host:/path/to/results/in/container
-```
-
-### <a name='Updatingthebasedocker'></a>Updating the base docker
-
-There will be situations where developers would be required to update the third party dependancies to newer versions, or upgrade CUDA etc. In such a case, please follow the steps below:
-
-#### <a name='Buildbasedocker'></a>Build base docker
-
-The base dev docker is defined in `$NV_TAO_DS_TOP/docker/Dockerfile`. The python packages required for the TAO dev is defined in `$NV_TAO_DS_TOP/docker/requirements-pip.txt`. Once you have made the required change, please update the base docker using the build script in the same directory.
-
-```sh
-git submodule update --init --recursive
-git submodule foreach git pull origin main
-cd $NV_TAO_DS_TOP/docker
-./build.sh --build
-```
-
-The build script now supports cross-platform builds for x86_64 and ARM64 architectures. By default, it builds for your host architecture, but you can specify the target platform:
-
-```sh
-# Build for x86_64/AMD64 (default on x86_64 hosts)
+source scripts/envsetup.sh
+cd "$NV_TAO_DS_TOP/docker"
 ./build.sh --build --x86
-
-# Build for ARM64 (for Jetson/ARM devices)
 ./build.sh --build --arm
-
-# Build for both platforms (requires --push flag)
 ./build.sh --build --multiplatform --push
 ```
 
-For more build options, use the help flag:
-
-```sh
-./build.sh --help
-```
-
-#### <a name='Testthenewlybuiltbasedocker'></a>Test the newly built base docker
-
-The build script tags the newly built base docker with the username of the account in the user's local machine. Therefore, the developers may tests their new docker by using the `tao_ds` command with the `--tag` option.
-
-```sh
-tao_ds --tag $USER -- script args
-```
-
-#### <a name='Updatethenewdocker'></a>Update the new docker
-
-Once you are sufficiently confident about the newly built base docker, please do the following
-
-1. Push the newly built base docker to the registry
-
-    ```sh
-    # For single platform (x86 or arm)
-    bash $NV_TAO_DS_TOP/docker/build.sh --build --push --x86
-    
-    # For multi-platform (both x86 and arm)
-    bash $NV_TAO_DS_TOP/docker/build.sh --build --push --multiplatform
-    ```
-
-2. The above step produces a digest file associated with the docker. This is a unique identifier for the docker. So please note this, and update all references of the old digest in the repository with the new digest. The manifest file at `$NV_TAO_DS_TOP/docker/manifest.json` now contains platform-specific digests for both x86 and ARM architectures. Update the appropriate digest(s) based on which platform(s) you built.
-
-Push you final updated changes to the repository so that other developers can leverage and sync with the new dev environment.
-
-Please note that if for some reason you would like to force build the docker without using a cache from the previous docker, you may do so by using the `--force` option.
-
-```sh
-bash $NV_TAO_DS_TOP/docker/build.sh --build --push --force --x86
-```
-
-## <a name='Buildingareleasecontainer'></a>Building a release container
-
-The TAO container is built on top of the TAO Data-services base dev container, by building a python wheel for the `nvidia_tao_ds` module in this repository and installing the wheel in the Dockerfile defined in `release/docker/Dockerfile`. The whole build process is captured in a single shell script which may be run as follows:
+The release image builds a wheel for `nvidia_tao_ds` and installs it through
+`release/docker/Dockerfile.release`.
 
 ```sh
 source scripts/envsetup.sh
-cd $NV_TAO_DS_TOP/release/docker
+cd "$NV_TAO_DS_TOP/release/docker"
 ./deploy.sh --build --wheel
 ```
 
-In order to build a new docker, please edit the `deploy.sh` file in `$NV_TAO_DS_TOP/release/docker` to update the patch version and re-run the steps above.
+## Contributing
 
-## <a name='ContributionGuidelines'></a>Contribution Guidelines
-TAO Toolkit Data-services is not accepting contributions as part of the TAO 5.0 release, but will be open in the future.
+TAO Toolkit Data Services is not accepting external contributions for this
+release stream. Internal changes should keep generated README content in sync by
+running:
 
-## <a name='License'></a>License
+```sh
+python tools/update_readme_supported_commands.py --check
+```
+
+## License
+
 This project is licensed under the [Apache-2.0](./LICENSE) License.

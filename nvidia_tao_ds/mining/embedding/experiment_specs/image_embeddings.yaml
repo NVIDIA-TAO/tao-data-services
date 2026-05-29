@@ -1,0 +1,6 @@
+input_parquet: ???
+output_parquet: ???
+model: ???
+model_path: ???
+model_config_path: ""
+batch_size: 64

@@ -1,0 +1,7 @@
+inference_results_dir: ???
+train_config: ???
+kpi_media_path: ""
+threshold: -1.0
+min_recall: 1.0
+top_k_per_label: 50
+results_dir: ???

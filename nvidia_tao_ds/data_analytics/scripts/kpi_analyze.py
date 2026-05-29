@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Entrypoint script to run TAO kpi analyze."""
 
@@ -7,7 +8,7 @@ import sys
 from prettytable import PrettyTable
 import pandas as pd
 
-from nvidia_tao_core.config.analytics.default_config import ExperimentConfig
+from nvidia_tao_ds.config.analytics.default_config import ExperimentConfig
 from nvidia_tao_ds.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_ds.core.logging.logging import logger
 from nvidia_tao_ds.data_analytics.utils import data_format, data_process, kpi, wandb, local_visualize

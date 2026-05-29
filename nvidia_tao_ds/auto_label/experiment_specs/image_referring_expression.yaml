@@ -1,0 +1,24 @@
+results_dir: ???
+autolabel_type: "image_referring_expression"
+
+image_referring_expression:
+  vlm:
+    backend: "gemini"
+    gemini:
+      api_key: ""                               # Set GOOGLE_API_KEY env var or fill in here
+      model: "gemini-3.1-flash-lite-preview"
+      media_resolution: "MEDIA_RESOLUTION_HIGH"
+      temperature: 0.3
+      max_output_tokens: 8192
+      timeout: 120
+
+  workflow:
+    steps: ["0", "1", "2", "3"]
+    max_workers: 4
+    force_reprocess: false
+    output_format: "both"   # "jsonl", "legacy", or "both"
+
+  data:
+    image_dir: ???                  # Directory containing input images (.jpg/.png)
+    kitti_label_dir: ???            # Directory containing KITTI-format label files
+    input_annotations_jsonl: ""     # Optional: pre-seeded annotations.jsonl to resume from

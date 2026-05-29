@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: update-readme-supported-commands
+        name: Update README supported commands
+        entry: python3 tools/update_readme_supported_commands.py
+        language: system
+        pass_filenames: false
+        files: ^(setup\.py|runner/tao_ds\.py|docker/manifest\.json|tools/update_readme_supported_commands\.py|README\.md|nvidia_tao_ds/.*/scripts/.*\.py)$

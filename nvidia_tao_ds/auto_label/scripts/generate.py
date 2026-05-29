@@ -1,37 +1,37 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Generate annotations using existing AI models in TAO Toolkit"""
 
 import os
 
-from nvidia_tao_core.config.auto_label.default_config import ExperimentConfig
+from nvidia_tao_ds.config.auto_label.default_config import ExperimentConfig
 from nvidia_tao_ds.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_ds.core.decorators import monitor_status
+from nvidia_tao_ds.core.logging.logging import enable_dual_logging
 
 from nvidia_tao_ds.auto_label.grounding_dino.inference import run_grounding_inference
+from nvidia_tao_ds.auto_label.image_grounding.inference import run_image_grounding_inference
+from nvidia_tao_ds.auto_label.image_referring_expression.inference import run_image_referring_expression_inference
 from nvidia_tao_ds.auto_label.mal.inference import run_mal_inference
+from nvidia_tao_ds.auto_label.video_reasoning_annotation.inference import run_video_reasoning_annotation_inference
 
 
 @monitor_status(mode='Auto-label')
 def run_experiment(cfg, results_dir=None):
     """Start the inference."""
+    enable_dual_logging()
     os.makedirs(results_dir, exist_ok=True)
     if cfg.autolabel_type == "grounding_dino":
         run_grounding_inference(cfg, results_dir)
     elif cfg.autolabel_type == "mal":
         run_mal_inference(cfg, results_dir)
+    elif cfg.autolabel_type == "video_reasoning_annotation":
+        run_video_reasoning_annotation_inference(cfg, results_dir)
+    elif cfg.autolabel_type == "image_grounding":
+        run_image_grounding_inference(cfg, results_dir)
+    elif cfg.autolabel_type == "image_referring_expression":
+        run_image_referring_expression_inference(cfg, results_dir)
     else:
         raise NotImplementedError(f"{cfg.autolabel_type}")
 

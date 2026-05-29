@@ -1,0 +1,22 @@
+results_dir: ???
+autolabel_type: "image_grounding"
+
+image_grounding:
+  vlm:
+    backend: "gemini"
+    gemini:
+      api_key: ""                               # Set GOOGLE_API_KEY env var or fill in here
+      model: "gemini-3.1-flash-lite-preview"
+      media_resolution: "MEDIA_RESOLUTION_HIGH"
+      temperature: 0.3
+      max_output_tokens: 8192
+      timeout: 120
+
+  workflow:
+    steps: ["0", "1"]
+    max_workers: 4
+    force_reprocess: false
+
+  data:
+    input_jsonl: ???      # Path to input JSONL (one object per line with image_path + caption)
+    image_root: ""        # Optional prefix for relative image_path entries

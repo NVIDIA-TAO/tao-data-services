@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="500" viewBox="0 0 1040 500" role="img" aria-labelledby="title desc">
+  <title id="title">TAO Data Services container launch and build flow</title>
+  <desc id="desc">The tao_ds launcher reads the manifest, starts the base image, mounts the workspace, and supports base and release image build scripts.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#596f8f"/>
+    </marker>
+    <style>
+      .box { fill: #fbfcfd; stroke: #596f8f; stroke-width: 2; rx: 8; }
+      .input { fill: #eef7fb; }
+      .image { fill: #f7f0ff; }
+      .build { fill: #fff6e6; }
+      .title { font: 700 18px sans-serif; fill: #1f2935; }
+      .text { font: 14px sans-serif; fill: #243244; }
+      .small { font: 12px sans-serif; fill: #4d5a66; }
+      .line { stroke: #596f8f; stroke-width: 2.2; marker-end: url(#arrow); fill: none; }
+    </style>
+  </defs>
+  <rect x="28" y="28" width="984" height="444" rx="12" fill="#ffffff" stroke="#d6dee2"/>
+  <text x="55" y="68" class="title">Launch Path</text>
+  <text x="55" y="300" class="title">Build Paths</text>
+
+  <rect x="70" y="100" width="210" height="74" class="box input"/>
+  <text x="90" y="130" class="text">scripts/envsetup.sh</text>
+  <text x="90" y="152" class="small">exports tao_ds function</text>
+
+  <rect x="335" y="100" width="210" height="74" class="box input"/>
+  <text x="355" y="130" class="text">runner/tao_ds.py</text>
+  <text x="355" y="152" class="small">validates mounts and flags</text>
+
+  <rect x="600" y="78" width="190" height="54" class="box image"/>
+  <text x="620" y="111" class="text">docker/manifest.json</text>
+
+  <rect x="600" y="150" width="190" height="54" class="box image"/>
+  <text x="620" y="183" class="text">base image digest</text>
+
+  <rect x="835" y="100" width="145" height="74" class="box image"/>
+  <text x="855" y="130" class="text">docker run</text>
+  <text x="855" y="152" class="small">/workspace mount</text>
+
+  <rect x="70" y="332" width="230" height="78" class="box build"/>
+  <text x="90" y="362" class="text">docker/build.sh</text>
+  <text x="90" y="384" class="small">base dev image</text>
+
+  <rect x="405" y="332" width="230" height="78" class="box build"/>
+  <text x="425" y="362" class="text">release/docker/deploy.sh</text>
+  <text x="425" y="384" class="small">wheel plus release image</text>
+
+  <rect x="740" y="332" width="220" height="78" class="box build"/>
+  <text x="760" y="362" class="text">registry digest update</text>
+  <text x="760" y="384" class="small">copy digest to manifest</text>
+
+  <path d="M280 137 L335 137" class="line"/>
+  <path d="M545 137 L600 105" class="line"/>
+  <path d="M695 132 L695 150" class="line"/>
+  <path d="M790 177 L835 137" class="line"/>
+  <path d="M300 371 L405 371" class="line"/>
+  <path d="M635 371 L740 371" class="line"/>
+</svg>
