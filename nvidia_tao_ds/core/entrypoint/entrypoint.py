@@ -6,6 +6,7 @@
 import re
 import ast
 import importlib
+import json
 import logging
 import os
 import pkgutil
@@ -92,6 +93,82 @@ def dual_output(log_file=None):
             yield sys.stdout, f
     else:
         yield sys.stdout, None
+
+
+def _resolve_results_dir(args, unknown_args):
+    """Best-effort resolution of the effective results_dir for a subtask.
+
+    Mirrors Hydra precedence (CLI override > spec file). Used to locate the
+    ``status.json`` written by ``@monitor_status``. Returns ``None`` when the
+    directory cannot be determined, in which case the status-file check is
+    simply skipped and the subprocess return code remains the sole signal.
+
+    Args:
+        args (dict): Parsed entrypoint arguments.
+        unknown_args (list): Remaining Hydra-style override tokens.
+
+    Returns:
+        str or None: The results directory, or None if it cannot be resolved.
+    """
+    # A `results_dir=...` Hydra override on the command line wins.
+    for token in unknown_args:
+        if token.startswith("results_dir="):
+            return token.split("results_dir=", 1)[1]
+    # Microservices pass results_dir directly through args.
+    if args.get("results_dir"):
+        return args["results_dir"]
+    # Fall back to the spec file's top-level results_dir.
+    spec_file = args.get("experiment_spec_file")
+    if spec_file and os.path.exists(spec_file):
+        try:
+            with open(spec_file, 'r') as spec:
+                exp_config = yaml.safe_load(spec) or {}
+            results_dir = exp_config.get("results_dir")
+            # "???" is Hydra's mandatory-value placeholder, not a real path.
+            if results_dir and results_dir != "???":
+                return results_dir
+        except (OSError, yaml.YAMLError):
+            return None
+    return None
+
+
+def _status_reports_failure(results_dir):
+    """Return True if the subtask's status.json final state is FAILURE.
+
+    ``status.json`` is a JSON-lines file; the authoritative final state is the
+    last valid record. This is a best-effort secondary signal for the case
+    where a subtask catches its own error, records FAILURE, yet still exits 0
+    (so the subprocess return code alone would miss it). Any read/parse problem
+    returns False, leaving the subprocess return code as the primary signal.
+
+    Args:
+        results_dir (str or None): Directory expected to contain status.json.
+
+    Returns:
+        bool: True only if the last status record reads FAILURE.
+    """
+    if not results_dir:
+        return False
+    status_file = os.path.join(results_dir, "status.json")
+    if not os.path.exists(status_file):
+        return False
+    last_status = None
+    try:
+        with open(status_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                status = record.get("status")
+                if status:
+                    last_status = status
+    except OSError:
+        return False
+    return last_status == "FAILURE"
 
 
 def launch(args, unknown_args, subtasks, multigpu_support=['generate'], network="tao_ds"):
@@ -212,6 +289,7 @@ def launch(args, unknown_args, subtasks, multigpu_support=['generate'], network=
 
     process_passed = False
     user_error = False
+    interrupted = False
     start = time()
     progress_bar_pattern = re.compile(r"Epoch \d+: \s*\d+%|\[.*\]")
 
@@ -258,6 +336,7 @@ def launch(args, unknown_args, subtasks, multigpu_support=['generate'], network=
     except (KeyboardInterrupt, SystemExit) as e:
         logging.info("Command was interrupted due to ", e)
         process_passed = True
+        interrupted = True
     except Exception as e:
         # Check if the exception is a user configuration error
         error_message = str(e)
@@ -294,9 +373,24 @@ def launch(args, unknown_args, subtasks, multigpu_support=['generate'], network=
         print(f"[Error]: {e}")
         pass
 
+    # Secondary, authoritative failure signal: a subtask may catch its own
+    # error, record FAILURE in status.json, yet still exit 0 (so the subprocess
+    # return code alone would report success). Honour the recorded status.
+    # Skipped on user/system interruption, which is intentionally a pass.
+    if process_passed and not interrupted and _status_reports_failure(
+        _resolve_results_dir(args, unknown_args)
+    ):
+        logging.warning(
+            "Subprocess exited 0 but status.json records FAILURE; treating the run as failed."
+        )
+        process_passed = False
+
     if not process_passed:
         print("Execution status: FAIL")
-        return False
+        # Propagate the failure to the process exit code so CI/automation that
+        # keys off `$?` sees a non-zero status (the subtask's status.json and
+        # subprocess return code already recorded the failure).
+        sys.exit(1)
 
     print("Execution status: PASS")
     return True

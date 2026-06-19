@@ -16,6 +16,7 @@ from nvidia_tao_ds.core.logging.logging import logging as logger
 from nvidia_tao_ds.core.utils.video_utils import (
     get_video_length_sec,
     sample_frames,
+    video_mime_type,
 )
 
 INLINE_VIDEO_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -158,7 +159,7 @@ class GeminiClient(LLMClient):
             video_bytes = f.read()
 
         parts = [
-            types.Part(inline_data=types.Blob(mime_type="video/mp4", data=video_bytes)),
+            types.Part(inline_data=types.Blob(mime_type=video_mime_type(video_path), data=video_bytes)),
             types.Part(text=prompt),
         ]
         response = self._call_with_retry(
@@ -220,7 +221,7 @@ class GeminiClient(LLMClient):
             )
 
         parts = [
-            types.Part(file_data=types.FileData(file_uri=uploaded.uri, mime_type="video/mp4")),
+            types.Part(file_data=types.FileData(file_uri=uploaded.uri, mime_type=video_mime_type(video_path))),
             types.Part(text=prompt),
         ]
         response = self._call_with_retry(

@@ -87,6 +87,26 @@ because Docker buildx cannot load multiple architectures into the local Docker
 daemon at once. After pushing, update `docker/manifest.json` with the digest
 printed by the build script.
 
+**Update every digest reference, not just `docker/manifest.json`.** The base-image
+digest is hardcoded in several files. A base-image rebuild must update all of them for
+the target architecture (`x86` and/or `arm`), or CI, Jenkins, and the release build will
+keep pulling the stale image:
+
+| Location | What it drives |
+| :--- | :--- |
+| `docker/manifest.json` | `tao_ds` launcher + `ci/utils.py` (static/functional tests); per-arch `x86`/`arm` digests — the source of truth |
+| `.gitlab-ci.yml` | the `image:` the GitLab static-test jobs run in |
+| `Jenkinsfile.dev`, `Jenkinsfile.develop`, `Jenkinsfile.nightly` | the `base-image` container the Jenkins jobs run in |
+| `Jenkinsfile.release` | `BUILD_X86` / `BUILD_ARM` release base images |
+| `release/docker/Dockerfile.release` | `FROM` base digests for the release image |
+
+Find them all with `grep -rl <old-digest> .` and replace per architecture (the `x86`
+and `arm` digests are distinct strings, so a per-digest `sed` is safe). The
+`check_base_image_digests_consistent` static test (`ci/run_static_tests.py`) fails the build
+if any of these files references a digest not in `docker/manifest.json`, so a partial bump
+is caught in CI. The README intentionally does **not** carry the digests (they are internal
+`nvstaging` references, not useful in a public repo) — do not re-add them.
+
 ## Update The Release Image
 
 Use `release/docker/deploy.sh` for the release image:

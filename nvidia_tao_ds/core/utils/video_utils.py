@@ -10,6 +10,20 @@ import tempfile
 
 from nvidia_tao_ds.core.logging.logging import logging as logger
 
+_VIDEO_MIME_BY_EXT = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+}
+
+
+def video_mime_type(video_path):
+    """Infer video MIME type from file extension; default to video/mp4."""
+    ext = os.path.splitext(video_path)[1].lower()
+    return _VIDEO_MIME_BY_EXT.get(ext, "video/mp4")
+
 
 def get_video_length_sec(video_path):
     """Return the duration of a video in seconds using ffprobe.
@@ -77,9 +91,10 @@ def sample_frames(video_path, duration_sec, sample_fps=0.5, max_frames=60):
 
 
 def split_video_into_chunks(input_path, output_dir, chunk_duration=5):
-    """Split a video into fixed-duration MP4 chunks using ffmpeg.
+    """Split a video into fixed-duration WebM chunks using ffmpeg.
 
-    Each chunk is re-encoded with libx264/aac and written to *output_dir*.
+    Each chunk is re-encoded with VP9 video (no audio) and
+    written to *output_dir*.
 
     Args:
         input_path (str): Path to the source video file.
@@ -102,15 +117,17 @@ def split_video_into_chunks(input_path, output_dir, chunk_duration=5):
 
     while start_time + 1 <= duration:
         end_time = min(start_time + chunk_duration, duration)
-        output_path = os.path.join(output_dir, f"chunk_{chunk_index:03d}.mp4")
+        output_path = os.path.join(output_dir, f"chunk_{chunk_index:03d}.webm")
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
             "-ss", str(start_time),
             "-to", str(end_time),
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-strict", "experimental",
+            "-c:v", "libvpx-vp9",
+            "-b:v", "1M",
+            "-deadline", "realtime",
+            "-cpu-used", "5",
+            "-an",
             output_path,
         ]
         try:
@@ -166,9 +183,11 @@ def extract_highlight_clip(video_path, anomaly_time_sec, output_path,
         "-i", video_path,
         "-ss", str(start_time),
         "-to", str(end_time),
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-strict", "experimental",
+        "-c:v", "libvpx-vp9",
+        "-b:v", "1M",
+        "-deadline", "realtime",
+        "-cpu-used", "5",
+        "-an",
         output_path,
     ]
     try:

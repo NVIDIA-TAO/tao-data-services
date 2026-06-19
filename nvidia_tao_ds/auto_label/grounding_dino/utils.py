@@ -10,6 +10,32 @@ import torch
 from PIL import ImageDraw, ImageFont
 
 
+def _load_label_font(size=20):
+    """Load a TrueType font for box labels, robust to the OpenCV build.
+
+    The codec-hardened images rebuild OpenCV WITH_QT=OFF (TAO-2183 / FF-3), so the Qt font
+    that the stock opencv-python wheel bundled at ``cv2/qt/fonts/DejaVuSans.ttf`` is no
+    longer present. Try that legacy path first (stock OpenCV), then common system
+    DejaVuSans locations, then fall back to PIL's built-in default font so labels always
+    render regardless of the OpenCV build.
+    """
+    candidates = [
+        os.path.join(cv2.__path__[0], 'qt', 'fonts', 'DejaVuSans.ttf'),
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+    ]
+    for font_path in candidates:
+        if os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(font_path, size=size)
+            except OSError:
+                continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # older Pillow: load_default() takes no size argument
+        return ImageFont.load_default()
+
+
 def get_json_result(anns, ann_type="grounding"):
     """Process dictionary into JSONL element format."""
     regions = []
@@ -89,8 +115,7 @@ def plot_boxes_to_image(image_pil, tgt):
 
         draw.rectangle([x0, y0, x1, y1], outline=color, width=6)
 
-        font_path = os.path.join(cv2.__path__[0], 'qt', 'fonts', 'DejaVuSans.ttf')
-        font = ImageFont.truetype(font_path, size=20)
+        font = _load_label_font(size=20)
 
         if hasattr(font, "getbbox"):
             bbox = draw.textbbox((x0, y0), str(label), font)
