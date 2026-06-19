@@ -73,7 +73,7 @@ def _process_video_entry(entry, vlm_client, llm_client, prompts, vcfg, temp_dir)
     logger.info("Anomaly at %.1fs for %s (video: %.1fs)", anomaly_time, video_name, video_length)
 
     highlight_dir = os.path.join(temp_dir, f"{video_name}_{path_hash}_highlight")
-    highlight_path = os.path.join(highlight_dir, "highlight.mp4")
+    highlight_path = os.path.join(highlight_dir, "highlight.webm")
 
     before_sec = vcfg.workflow.highlight_before_sec
     after_sec = vcfg.workflow.highlight_after_sec

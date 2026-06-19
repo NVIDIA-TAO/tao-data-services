@@ -15,6 +15,7 @@ from nvidia_tao_ds.core.logging.logging import logging as logger
 from nvidia_tao_ds.core.utils.video_utils import (
     get_video_length_sec,
     sample_frames,
+    video_mime_type,
 )
 
 _IMAGE_MIME_BY_EXT = {
@@ -81,10 +82,10 @@ class OpenAICompatibleClient(LLMClient):
         """Generate text conditioned on a video and prompt via an OpenAI-compatible endpoint.
 
         Long videos are frame-sampled and sent as images; short videos are
-        sent as inline base64-encoded MP4.
+        sent as inline base64-encoded video.
 
         Args:
-            video_path (str): Path to the input video file (MP4).
+            video_path (str): Path to the input video file.
             prompt (str): The text prompt accompanying the video.
             temperature (float | None): Sampling temperature override.
 
@@ -119,10 +120,11 @@ class OpenAICompatibleClient(LLMClient):
         with open(video_path, "rb") as f:
             b64_video = base64.b64encode(f.read()).decode("utf-8")
 
+        mime = video_mime_type(video_path)
         content = [
             {
                 "type": "video_url",
-                "video_url": {"url": f"data:video/mp4;base64,{b64_video}"},
+                "video_url": {"url": f"data:{mime};base64,{b64_video}"},
             },
             {"type": "text", "text": prompt},
         ]

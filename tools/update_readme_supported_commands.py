@@ -178,26 +178,19 @@ def render_generated_section(repo_root: Path) -> str:
         subtasks = "<br>".join(f"`{subtask}`" for subtask in script.subtasks) or "`None`"
         lines.append(f"| `{script.command}` | `{script.target}` | {subtasks} |")
 
-    registry = manifest["registry"]
     repository = manifest["repository"]
     lines.extend(
         [
             "",
             "### Base Image Source",
             "",
-            "`runner/tao_ds.py` and `ci/utils.py` resolve the immutable base image from",
-            "`docker/manifest.json`, choosing the digest for the host architecture.",
-            "",
-            "| Architecture | Image reference |",
-            "| :--- | :--- |",
+            f"`runner/tao_ds.py` and `ci/utils.py` resolve the immutable base image",
+            f"(`{repository}`) from `docker/manifest.json`, choosing the architecture-specific",
+            "digest for the host. The pinned digests are intentionally not duplicated here — they",
+            "live in `docker/manifest.json` (and the CI / Jenkins / release files), and a static CI",
+            "check (`ci/run_static_tests.py`) verifies those digest references stay in sync.",
         ]
     )
-    if "digests" in manifest:
-        for arch, digest in sorted(manifest["digests"].items()):
-            lines.append(f"| `{arch}` | `{registry}/{repository}@{digest}` |")
-    else:
-        lines.append(f"| all | `{registry}/{repository}@{manifest['digest']}` |")
-
     lines.append(END)
     return "\n".join(lines)
 
