@@ -158,4 +158,3 @@ python tools/update_readme_supported_commands.py --check
 ## License
 
 This project is licensed under the [Apache-2.0](./LICENSE) License.
-

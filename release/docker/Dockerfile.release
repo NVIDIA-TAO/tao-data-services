@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
 ARG ARM64_DIGEST=51e4a9113ad9bfbd9b6d3a140bdb8ca73fb4f091e922406c139addcbcecc5714
@@ -41,15 +43,13 @@ RUN pip install --upgrade pip && \
 
 # Installing PyTorch
 COPY tao-pytorch tao-pytorch
-RUN pip install pyarmor==8.5.8 && \
-    export WORKSPACE=/opt/nvidia/tao-pytorch && \
-    cd tao-pytorch && bash release/docker/build_wheel.sh && \
+RUN cd tao-pytorch && pip install --upgrade pip setuptools wheel && python setup.py bdist_wheel && \
     find dist/ -name "nvidia_tao_pytorch*.whl" -type f | xargs -n 1 pip install && \
     cd .. && rm -rf tao-pytorch
 
 # Installing TAO-Core
 COPY tao-core tao-core
-RUN cd tao-core && bash release/python/build_wheel.sh && \
+RUN cd tao-core && pip install --upgrade pip setuptools wheel && python setup.py bdist_wheel && \
     find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
     mkdir -p /etc/nginx/ && cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
     cd .. && rm -rf tao-core

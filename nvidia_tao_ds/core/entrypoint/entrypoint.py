@@ -18,8 +18,14 @@ from contextlib import contextmanager
 
 import yaml
 
-from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
-from nvidia_tao_core.telemetry.nvml import get_device_details
+try:
+    from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
+    from nvidia_tao_core.telemetry.nvml import get_device_details
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    send_telemetry_data = None
+    get_device_details = None
+    TELEMETRY_AVAILABLE = False
 
 
 def get_subtasks(package):
@@ -355,6 +361,9 @@ def launch(args, unknown_args, subtasks, multigpu_support=['generate'], network=
     time_lapsed = int(end - start)
 
     try:
+        if not TELEMETRY_AVAILABLE:
+            print("Telemetry module not available, skipping telemetry data.")
+            raise ImportError("nvidia_tao_core.telemetry is not available")
         gpu_data = list()
         for device in get_device_details():
             gpu_data.append(device.get_config())
