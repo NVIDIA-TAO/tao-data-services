@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from enum import Enum
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
+
+_log = logging.getLogger(__name__)
 
 
 class AnnotationFormat(str, Enum):
@@ -39,7 +42,30 @@ def load_annotations(path: str, fmt: AnnotationFormat) -> Tuple[dict, dict, dict
     return _FORMAT_LOADERS[fmt](path)
 
 
-def _load_kitti(label_dir: str) -> Tuple[dict, dict, dict, dict]:
+def load_scored_annotations(path: str, fmt: AnnotationFormat) -> Tuple[dict, dict, dict, dict]:
+    """Like :func:`load_annotations` but box tuples include a confidence score.
+
+    Identical to :func:`load_annotations` in every respect except that the
+    ``*_to_boxes`` maps contain ``(class_name, [x, y, w, h], score_or_None)``
+    3-tuples instead of 2-tuples. ``score_or_None`` is ``None`` when no score
+    is present in the source (e.g. ground-truth KITTI/COCO files).
+
+    Args:
+        path: Path to a KITTI label directory or a COCO ``.json`` file.
+        fmt: The annotation format, declared explicitly by the caller.
+
+    Returns:
+        A ``(fp_to_classes, bn_to_classes, fp_to_boxes, bn_to_boxes)`` tuple
+        where ``*_to_boxes`` values are lists of ``(class_name, [x, y, w, h], score_or_None)``.
+
+    Raises:
+        FileNotFoundError: if ``path`` does not exist.
+        ValueError: if a COCO file is invalid.
+    """
+    return _FORMAT_LOADERS[fmt](path, with_scores=True)
+
+
+def _load_kitti(label_dir: str, with_scores: bool = False) -> Tuple[dict, dict, dict, dict]:
     """
     Parse a KITTI label directory. Each .txt file corresponds to one image
     (filename stem matches image basename stem). Each line format:
@@ -49,6 +75,9 @@ def _load_kitti(label_dir: str) -> Tuple[dict, dict, dict, dict]:
     Since KITTI has no absolute image paths, only basename (stem) matching is
     populated; fp_to_* dicts are always empty. Malformed lines within a label file
     are skipped; an empty directory (no ``.txt`` files) raises.
+
+    When ``with_scores`` is True, box entries are ``(class, bbox, score_or_None)``
+    3-tuples; otherwise they are ``(class, bbox)`` 2-tuples.
 
     Raises:
         FileNotFoundError: If the directory contains no ``.txt`` label files.
@@ -80,17 +109,33 @@ def _load_kitti(label_dir: str) -> Tuple[dict, dict, dict, dict]:
                     continue
                 bbox = [x1, y1, x2 - x1, y2 - y1]  # convert to [x, y, w, h]
                 bn_to_classes.setdefault(bn, set()).add(cat_name)
-                bn_to_boxes.setdefault(bn, []).append((cat_name, bbox))
+                if with_scores:
+                    score: Optional[float] = None
+                    if len(parts) >= 16:
+                        try:
+                            score = float(parts[15])
+                        except ValueError:
+                            _log.warning(
+                                "Malformed score field %r in %s — treating as unscored",
+                                parts[15], txt_file,
+                            )
+                    bn_to_boxes.setdefault(bn, []).append((cat_name, bbox, score))
+                else:
+                    bn_to_boxes.setdefault(bn, []).append((cat_name, bbox))
 
     return {}, bn_to_classes, {}, bn_to_boxes
 
 
-def _load_coco(coco_file: str) -> Tuple[dict, dict, dict, dict]:
+def _load_coco(coco_file: str, with_scores: bool = False) -> Tuple[dict, dict, dict, dict]:
     """
     Parse a COCO JSON file in one pass.
     Returns (fp_to_classes, bn_to_classes, fp_to_boxes, bn_to_boxes) where:
     - fp/bn_to_classes: path → set of class names
     - fp/bn_to_boxes:   path → list of (class_name, [x, y, w, h])
+
+    When ``with_scores`` is True, box entries are ``(class, bbox, score_or_None)``
+    3-tuples; ``score_or_None`` is the annotation's ``"score"`` field or ``None``
+    when absent (standard for ground-truth COCO files).
 
     Raises ValueError if the file is not a valid JSON object or is missing the
     'images' / 'annotations' keys (i.e. is not a COCO annotation file).
@@ -137,8 +182,22 @@ def _load_coco(coco_file: str) -> Tuple[dict, dict, dict, dict]:
         bn_to_fps.setdefault(bn, set()).add(fp)
         bbox = ann.get("bbox")
         if bbox and len(bbox) == 4:
-            fp_to_boxes.setdefault(fp, []).append((cat_name, bbox))
-            bn_to_boxes.setdefault(bn, []).append((cat_name, bbox))
+            if with_scores:
+                raw_score = ann.get("score")
+                score: Optional[float] = None
+                if raw_score is not None:
+                    try:
+                        score = float(raw_score)
+                    except (TypeError, ValueError):
+                        _log.warning(
+                            "Invalid score value %r in COCO file — treating as unscored",
+                            raw_score,
+                        )
+                entry = (cat_name, bbox, score)
+            else:
+                entry = (cat_name, bbox)
+            fp_to_boxes.setdefault(fp, []).append(entry)
+            bn_to_boxes.setdefault(bn, []).append(entry)
 
     # A basename shared by multiple distinct image paths is ambiguous — its
     # basename-keyed annotations merge unrelated images. Drop those from the

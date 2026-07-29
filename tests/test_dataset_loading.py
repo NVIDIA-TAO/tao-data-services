@@ -1,26 +1,22 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
-"""Tests for nvidia_tao_ds/core/utils/dataset_loading.py (COCO annotation loading).
+"""Tests for nvidia_tao_ds/core/utils/dataset_loading.py.
 
-CPU-only: exercises the pure-Python COCO parser, no RAPIDS/GPU required.
+CPU-only: exercises the pure-Python KITTI/COCO parsers, no RAPIDS/GPU required.
 """
 
 import json
 from pathlib import Path
 
-from nvidia_tao_ds.core.utils.dataset_loading import _load_coco
+import pytest
+
+from nvidia_tao_ds.core.utils.dataset_loading import (
+    AnnotationFormat,
+    _load_coco,
+    load_annotations,
+    load_scored_annotations,
+)
 
 
 def _write_coco(path, images, categories, annotations):
@@ -67,3 +63,70 @@ def test_load_coco_keeps_unambiguous_basename(tmp_path):
     )
     _, bn_to_classes, _, _ = _load_coco(coco)
     assert bn_to_classes["cat.png"] == {"dog"}
+
+
+# ---------------------------------------------------------------------------
+# load_scored_annotations — KITTI
+# ---------------------------------------------------------------------------
+
+_KITTI_LINE = "Car 0.00 0 -1.57 614.24 181.78 727.31 284.77 1.57 1.73 4.15 1.00 1.75 8.20 -1.56"
+
+
+@pytest.fixture()
+def kitti_scored(tmp_path):
+    d = tmp_path / "labels"
+    d.mkdir()
+    (d / "img_a.txt").write_text(_KITTI_LINE + " 0.92\n")
+    (d / "img_b.txt").write_text(_KITTI_LINE + "\n")  # no score
+    return str(d)
+
+
+def test_load_scored_kitti_returns_three_tuples(kitti_scored):
+    _, _, _, bn = load_scored_annotations(kitti_scored, AnnotationFormat.KITTI)
+    assert all(len(b) == 3 for b in bn["img_a"])
+
+
+def test_load_scored_kitti_score_parsed(kitti_scored):
+    _, _, _, bn = load_scored_annotations(kitti_scored, AnnotationFormat.KITTI)
+    assert bn["img_a"][0][2] == pytest.approx(0.92)
+
+
+def test_load_scored_kitti_missing_score_is_none(kitti_scored):
+    _, _, _, bn = load_scored_annotations(kitti_scored, AnnotationFormat.KITTI)
+    assert bn["img_b"][0][2] is None
+
+
+def test_load_annotations_ignores_kitti_score(kitti_scored):
+    """load_annotations must still return 2-tuples even when the source has scores."""
+    _, _, _, bn = load_annotations(kitti_scored, AnnotationFormat.KITTI)
+    assert all(len(b) == 2 for b in bn["img_a"])
+
+
+# ---------------------------------------------------------------------------
+# load_scored_annotations — COCO
+# ---------------------------------------------------------------------------
+
+def test_load_scored_coco_score_populated(tmp_path):
+    preds_path = tmp_path / "preds.json"
+    _write_coco(
+        preds_path,
+        images=[(1, "img.jpg")], categories=[(1, "car")],
+        annotations=[(1, 1, [0, 0, 10, 10])],
+    )
+    # Manually inject score into annotation
+    data = json.loads(preds_path.read_text())
+    data["annotations"][0]["score"] = 0.85
+    preds_path.write_text(json.dumps(data))
+
+    _, _, fp, _ = load_scored_annotations(str(preds_path), AnnotationFormat.COCO)
+    assert fp["img.jpg"][0][2] == pytest.approx(0.85)
+
+
+def test_load_scored_coco_missing_score_is_none(tmp_path):
+    coco = _write_coco(
+        tmp_path / "gt.json",
+        images=[(1, "img.jpg")], categories=[(1, "car")],
+        annotations=[(1, 1, [0, 0, 10, 10])],
+    )
+    _, _, fp, _ = load_scored_annotations(coco, AnnotationFormat.COCO)
+    assert fp["img.jpg"][0][2] is None
