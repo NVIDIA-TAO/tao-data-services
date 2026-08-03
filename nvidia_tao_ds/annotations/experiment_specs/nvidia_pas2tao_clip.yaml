@@ -1,0 +1,12 @@
+data:
+  input_format: "NVIDIA_PAS"
+  output_format: "TAO_CLIP"
+nvidia_pas:
+  root: ???
+  use_symlinks: true
+  only_natural_and_original: false
+  exclude_natural_from_aug: false
+  val_sample_fraction: 0.1
+  include_test: false
+  clean_output: false
+results_dir: ???

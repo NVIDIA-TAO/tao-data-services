@@ -9,6 +9,10 @@ from nvidia_tao_ds.annotations.conversion.coco_to_odvg import convert_coco_to_od
 from nvidia_tao_ds.annotations.conversion.coco_to_contiguous import convert_coco_to_contiguous
 from nvidia_tao_ds.annotations.conversion.odvg_to_coco import convert_odvg_to_coco
 from nvidia_tao_ds.annotations.conversion.aicity_to_ovpkl import convert_aicity_to_ovpkl
+from nvidia_tao_ds.annotations.conversion.nvidia_pas_to_tao_clip import convert_nvidia_pas_to_tao_clip
+from nvidia_tao_ds.annotations.conversion.nvidia_paidf_pas_to_tao_clip import (
+    convert_nvidia_paidf_pas_to_tao_clip,
+)
 
 
 CONVERSION_MAPPING = {
@@ -25,5 +29,11 @@ CONVERSION_MAPPING = {
     },
     "aicity": {
         "ovpkl": convert_aicity_to_ovpkl
+    },
+    "nvidia_pas": {
+        "tao_clip": convert_nvidia_pas_to_tao_clip
+    },
+    "nvidia_paidf_pas": {
+        "tao_clip": convert_nvidia_paidf_pas_to_tao_clip
     }
 }
