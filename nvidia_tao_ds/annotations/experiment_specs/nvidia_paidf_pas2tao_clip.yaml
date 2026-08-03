@@ -1,0 +1,12 @@
+data:
+  input_format: "NVIDIA_PAIDF_PAS"
+  output_format: "TAO_CLIP"
+
+nvidia_paidf_pas:
+  raw_output_dir: ???
+  attribute_vocab_path: ???
+  input_layout: "split_dataset"
+  caption_policy: "all"
+  overwrite: false
+
+results_dir: ???

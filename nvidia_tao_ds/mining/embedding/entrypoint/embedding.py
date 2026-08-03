@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser(
         "embedding",
         add_help=True,
-        description="Image/video embeddings entrypoint",
+        description="Image/text embeddings entrypoint",
     )
 
     # Build list of subtasks by inspecting the scripts package.

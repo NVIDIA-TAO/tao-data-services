@@ -189,7 +189,15 @@ RUN ARCH=$(uname -m) && \
     curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscliv2.zip && \
     cd /tmp && unzip -q awscliv2.zip && \
     ./aws/install --update --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli && \
-    rm -rf /tmp/awscliv2.zip /tmp/aws
+    rm -rf /tmp/awscliv2.zip /tmp/aws && \
+    CUR=$(basename "$(readlink -f /usr/local/aws-cli/v2/current)") && \
+    for d in /usr/local/aws-cli/v2/*/; do b=$(basename "$d"); \
+        [ "$b" != "current" ] && [ "$b" != "$CUR" ] && rm -rf "$d" || true; done && \
+    /usr/local/bin/aws --version
+# Stale-version cleanup above: `aws/install --update` keeps previous version dirs
+# (e.g. the base's v2/2.34.6 with its CVE-carrying libpython3.13) on disk; scanners
+# flag every libpython present, not just the `current` one. Out-of-SLA blockers
+# cleared by this: CVE-2026-3644/4224/7210 (bundled CPython 3.13.11/3.14.5).
 
 # ---------------------------------------------------------------------------
 # OpenCV rebuilt WITH_FFMPEG=OFF (TAO-2183 / FF-3)

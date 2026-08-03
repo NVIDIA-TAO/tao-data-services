@@ -1,7 +1,7 @@
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
-ARG ARM64_DIGEST=51e4a9113ad9bfbd9b6d3a140bdb8ca73fb4f091e922406c139addcbcecc5714
-ARG X86_DIGEST=d7f53a5e7844749c47ab656bc7943c8dfb248a8d60b7f07580a761f0f7f32cc7
+ARG ARM64_DIGEST=2e9e964f8a0fdfe40df17e58f379f002418737a1c13e73bb3a35a791bee2a244
+ARG X86_DIGEST=57a531fe0f7f90a81acbffb4383e15a1c5b7b8030645961d79a4b180c92e88ea
 
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${ARM64_DIGEST} AS base-arm64
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${X86_DIGEST} AS base-amd64
@@ -15,11 +15,21 @@ RUN python -m pip install pip --upgrade \
     && cd wheels && ls ./*.whl|xargs -I'{}' python -m pip install '{}' \
     && rm *.whl
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg libsm6 libxext6 openssl
+# Do NOT install the Ubuntu `ffmpeg` apt package here: the base image ships the
+# codec-disabled LGPL-only FFmpeg 8.1 source build (TAO-2183 / FF-4). The apt build
+# would reintroduce GPL/royalty codecs (libx264/x265) and the full decoder set,
+# including vulnerable ones the source build excludes (e.g. MagicYUV, CVE-2026-8461).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y libsm6 libxext6 openssl
 
 # NGC Security scan related fixes.
 # Low-level packages in apt are updated to resolve published security vulnerabilities ASAP
 # We retrieve these updates and upgrade the critical/high vulnerability ones
+# python3.12 family + libexpat1 added for the NGC scan of 7.1.0-data-services:
+#   - CVE-2026-11940, CVE-2026-11972 (tarfile), CVE-2026-3644 (http.cookies),
+#     CVE-2026-7210 (pyexpat hash-flooding), CVE-2026-4224 (Expat DTD stack overflow)
+#     — all High, fixed by the patched CPython 3.12 stdlib packages.
+#   - libexpat1: CVE-2026-7210 requires libexpat >= 2.8.0 in addition to the
+#     CPython patch; also covers the system-expat side of CVE-2026-4224.
 RUN apt-get update && \
     apt --only-upgrade install linux-libc-dev -y && \
     apt --only-upgrade install curl -y && \
@@ -34,7 +44,12 @@ RUN apt-get update && \
     apt --only-upgrade install gpgv -y && \
     apt --only-upgrade install gpgsm -y && \
     apt --only-upgrade install gpgconf -y && \
-    apt --only-upgrade install gpg-agent -y
+    apt --only-upgrade install gpg-agent -y && \
+    apt --only-upgrade install python3.12 -y && \
+    apt --only-upgrade install python3.12-minimal -y && \
+    apt --only-upgrade install libpython3.12-stdlib -y && \
+    apt --only-upgrade install libpython3.12-minimal -y && \
+    apt --only-upgrade install libexpat1 -y
 
 RUN pip install --upgrade pip && \
     python -m pip install --upgrade Werkzeug==3.0.1

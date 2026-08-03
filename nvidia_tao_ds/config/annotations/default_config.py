@@ -121,6 +121,52 @@ class AICityConfig:
 
 
 @dataclass
+class NVIDIAPASConfig:
+    """NVIDIA PAS to TAO CLIP conversion configuration template."""
+
+    root: str = STR_FIELD(value=MISSING, default_value="<specify NVIDIA_PAS root>")
+    use_symlinks: bool = BOOL_FIELD(value=True)
+    only_natural_and_original: bool = BOOL_FIELD(value=False)
+    exclude_natural_from_aug: bool = BOOL_FIELD(value=False)
+    val_sample_fraction: float = FLOAT_FIELD(value=0.1, default_value=0.1)
+    include_test: bool = BOOL_FIELD(value=False)
+    clean_output: bool = BOOL_FIELD(value=False)
+
+
+@dataclass
+class NVIDIAPAIDFPASConfig:
+    """Experimental NVIDIA PAIDF PAS to TAO CLIP conversion configuration."""
+
+    raw_output_dir: str = STR_FIELD(
+        value=MISSING,
+        default_value="<specify PAIDF PAS SDG output root>",
+    )
+    attribute_vocab_path: str = STR_FIELD(
+        value=MISSING,
+        default_value="<specify TAO-FT attribute vocabulary>",
+    )
+    input_layout: str = STR_FIELD(
+        value="split_dataset",
+        default_value="split_dataset",
+        valid_options="split_dataset,single_run",
+        description=(
+            "split_dataset uses V3.1 train/ with optional val and eval/test "
+            "inputs; single_run is the legacy experimental layout."
+        ),
+    )
+    caption_policy: str = STR_FIELD(
+        value="all",
+        default_value="all",
+        valid_options="all,easy,medium,hard",
+        description=(
+            "all emits every PAS query; a named difficulty emits only that "
+            "difficulty."
+        ),
+    )
+    overwrite: bool = BOOL_FIELD(value=False)
+
+
+@dataclass
 class ExperimentConfig:
     """Experiment configuration template."""
 
@@ -129,6 +175,10 @@ class ExperimentConfig:
     coco: COCOConfig = DATACLASS_FIELD(COCOConfig())
     odvg: ODVGConfig = DATACLASS_FIELD(ODVGConfig())
     aicity: AICityConfig = DATACLASS_FIELD(AICityConfig())
+    nvidia_pas: NVIDIAPASConfig = DATACLASS_FIELD(NVIDIAPASConfig())
+    nvidia_paidf_pas: NVIDIAPAIDFPASConfig = DATACLASS_FIELD(
+        NVIDIAPAIDFPASConfig()
+    )
     results_dir: Optional[str] = STR_FIELD(
         value="", default_value=""
     )

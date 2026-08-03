@@ -8,6 +8,8 @@ import json
 import h5py
 import copy
 import pickle
+import shutil
+import subprocess
 import tqdm
 import numpy as np
 
@@ -60,7 +62,7 @@ def convert_aicity_to_ovpkl(
     splits = splits.split(",")
     if rgb_format == "mp4":
         # convert mp4 to jpg
-        video_to_frame(root_path, splits)
+        video_to_frame(root_path, splits, num_frames=num_frames)
         rgb_format = "jpg"
 
     camera_group_config = None
@@ -110,7 +112,48 @@ def convert_aicity_to_ovpkl(
         )
 
 
-def video_to_frame(root_path: str, splits: list):
+def _video_to_frames(video_path: str, image_dir: str, num_frames: int = -1):
+    """Decode a synthetic-camera video with the container's supported backend."""
+    os.makedirs(image_dir, exist_ok=True)
+    existing_frames = sorted(
+        name for name in os.listdir(image_dir)
+        if name.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
+    required_frames = num_frames if num_frames > 0 else 1
+    if len(existing_frames) >= required_frames:
+        return
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-c:v", "h264_cuvid",
+            "-i", video_path,
+        ]
+        if num_frames > 0:
+            command.extend(["-frames:v", str(num_frames)])
+        command.extend(["-start_number", "0", os.path.join(image_dir, "%09d.jpg")])
+        subprocess.run(command, check=True)
+    else:
+        # Compatibility path for older images. New release images deliberately
+        # build OpenCV without FFmpeg and provide the audited ffmpeg binary.
+        video2frame_multi_cameras_syn(os.path.dirname(os.path.dirname(video_path)))
+
+    produced_frames = [
+        name for name in os.listdir(image_dir)
+        if name.lower().endswith((".jpg", ".jpeg", ".png"))
+    ]
+    if not produced_frames:
+        raise RuntimeError(
+            f"Video decoder produced no frames for {video_path}. "
+            "The Data Services image must include the supported ffmpeg H.264 decoder."
+        )
+
+
+def video_to_frame(root_path: str, splits: list, num_frames: int = -1):
     """Convert AICity videos to frames.
 
     Args:
@@ -124,7 +167,16 @@ def video_to_frame(root_path: str, splits: list):
             scene_path = os.path.join(split_root_path, scene_name)
             logger.info(f" Converting video to frames for scene: {scene_path}...")
             assert os.path.isdir(os.path.join(scene_path, "videos")), f"Videos directory not found at {scene_path}"
-            video2frame_multi_cameras_syn(scene_path)
+            videos_dir = os.path.join(scene_path, "videos")
+            for video_name in sorted(os.listdir(videos_dir)):
+                if not video_name.lower().endswith(".mp4"):
+                    continue
+                camera_name = os.path.splitext(video_name)[0]
+                _video_to_frames(
+                    os.path.join(videos_dir, video_name),
+                    os.path.join(scene_path, camera_name, "rgb"),
+                    num_frames=num_frames,
+                )
             logger.info(f" Video to frames conversion completed for scene: {scene_path}")
 
 

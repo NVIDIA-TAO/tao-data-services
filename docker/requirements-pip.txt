@@ -7,6 +7,8 @@
 # remain removed (not imported in nvidia_tao_ds, tests, tao-core, or tao-pytorch).
 # transformers/pynvml kept because tao-core imports them.
 accelerate==1.13.0
+colorama
+termcolor
 --extra-index-url=https://pypi.nvidia.com
 cudf-cu13==26.4.0
 cuml-cu13==26.4.0
