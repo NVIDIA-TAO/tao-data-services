@@ -49,6 +49,41 @@ def test_anchor_initialization_blas_thread_limit(tmp_path):
     assert np.load(output_file).shape[0] == 5
 
 
+def test_video_decode_uses_release_ffmpeg_and_limits_frames(tmp_path, monkeypatch):
+    from nvidia_tao_ds.annotations.conversion import aicity_to_ovpkl
+
+    video_path = tmp_path / "videos" / "Camera.mp4"
+    image_dir = tmp_path / "Camera" / "rgb"
+    video_path.parent.mkdir()
+    video_path.touch()
+    monkeypatch.setattr(aicity_to_ovpkl.shutil, "which", lambda _name: "/usr/local/bin/ffmpeg")
+
+    def fake_run(command, check):
+        assert check is True
+        assert command[command.index("-frames:v") + 1] == "3"
+        assert command[-1].endswith("%09d.jpg")
+        image_dir.mkdir(parents=True, exist_ok=True)
+        (image_dir / "000000000.jpg").touch()
+
+    monkeypatch.setattr(aicity_to_ovpkl.subprocess, "run", fake_run)
+
+    aicity_to_ovpkl._video_to_frames(str(video_path), str(image_dir), num_frames=3)
+
+
+def test_video_decode_rejects_silent_empty_opencv_fallback(tmp_path, monkeypatch):
+    from nvidia_tao_ds.annotations.conversion import aicity_to_ovpkl
+
+    video_path = tmp_path / "videos" / "Camera.mp4"
+    image_dir = tmp_path / "Camera" / "rgb"
+    video_path.parent.mkdir()
+    video_path.touch()
+    monkeypatch.setattr(aicity_to_ovpkl.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(aicity_to_ovpkl, "video2frame_multi_cameras_syn", lambda _root: None)
+
+    with pytest.raises(RuntimeError, match="produced no frames"):
+        aicity_to_ovpkl._video_to_frames(str(video_path), str(image_dir), num_frames=3)
+
+
 @pytest.mark.order(1)
 def test_aicity_to_ovpkl_conversion(results_dir):
     """"
