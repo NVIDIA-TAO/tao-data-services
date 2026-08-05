@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass
 from omegaconf import MISSING
-from nvidia_tao_ds.config.utils.types import INT_FIELD, STR_FIELD
+from nvidia_tao_ds.config.utils.types import FLOAT_FIELD, INT_FIELD, STR_FIELD
 
 
 @dataclass
@@ -67,4 +67,9 @@ class NearestNeighborsConfig:
         value="false",
         default_value="false",
         description="When 'true', drop mined pairs whose source label differs from the target label"
+    )
+    distance_threshold: float = FLOAT_FIELD(
+        value=-1.0,
+        default_value=-1.0,
+        description="Maximum allowed distance between a source-target pair. Disabled when negative."
     )

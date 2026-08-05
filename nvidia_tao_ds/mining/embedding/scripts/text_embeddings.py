@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 def get_input_texts(input_parquet: str) -> List[str]:
     """Get the input texts from the input parquet.
-    Expects the input parquet to have a column `text`."""
+
+    Expects the input parquet to have a column `text`.
+    """
     df_column = pd.read_parquet(input_parquet, columns=['text'])
     return df_column['text'].tolist()
 
@@ -39,7 +41,7 @@ def get_input_texts(input_parquet: str) -> List[str]:
 def get_batches(items, batch_size):
     """Split *items* into fixed-size chunks for batch processing."""
     return [
-        items[i : i + batch_size]
+        items[i:i + batch_size]
         for i in range(0, len(items), batch_size)
     ]
 
@@ -97,10 +99,11 @@ spec_root = Path(__file__).resolve().parent
     schema=TextEmbeddingsConfig
 )
 def main(cfg: TextEmbeddingsConfig) -> None:
-    """Takes in an input Parquet file with a `text` column and computes
-    an embedding specified by the model parameter. It then stores
-    the embedding in a new Parquet with 2 columns: `text`
-    and `embedding`."""
+    """Takes in an input Parquet file with a `text` column and computes an embedding.
+
+    An embedding specified by the model parameter is computed. It then stores
+    the embedding in a new Parquet with 2 columns: `text` and `embedding`.
+    """
     _log_level = getattr(logging, getenv("TAO_LOGGING_LEVEL", "INFO").upper(), logging.INFO)
     logging.basicConfig(
         level=_log_level,

@@ -111,7 +111,7 @@ subtasks are discovered from each command package's `scripts/` directory.
 | `embedding` | `nvidia_tao_ds.mining.embedding.entrypoint.embedding:main` | `image_embeddings`<br>`text_embeddings` |
 | `gap_analysis` | `nvidia_tao_ds.rcca.gap_analysis.entrypoint.gap_analysis:main` | `vcn_aoi`<br>`vlm_bcq` |
 | `image` | `nvidia_tao_ds.image.entrypoint.image:main` | `validate` |
-| `tmm` | `nvidia_tao_ds.mining.tmm.entrypoint.tmm:main` | `nearest_neighbors` |
+| `tmm` | `nvidia_tao_ds.mining.tmm.entrypoint.tmm:main` | `nearest_neighbors`<br>`unique_neighbor_matching` |
 
 ### Base Image Source
 

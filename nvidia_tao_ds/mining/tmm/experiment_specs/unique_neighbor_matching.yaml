@@ -1,0 +1,28 @@
+# Required (must be supplied at run time)
+source_path: ???              # file OR directory of parquets
+target_path: ???              # file OR directory of parquets
+output_dir: ???               # DIRECTORY: final_unique_files.parquet, summary.json,
+                              # per-iteration parquets, optional viz PNGs
+desired_unique_count: ???     # total unique source files to match
+
+# Matching
+allocation_policy: global     # global | class_stratified
+distance_metric: euclidean    # euclidean | cosine | manhattan
+candidate_expansion_factor: 5 # candidate-pool multiplier over per-target top-n; grows each iteration
+
+# Column names
+source_embedding_column: embedding
+target_embedding_column: embedding
+source_filepath_column: filepath
+target_filepath_column: filepath
+
+# Optional inputs (null = disabled)
+exclude_path: null
+source_detection_file: null   # COCO .json OR KITTI dir; required by logic in class_stratified
+target_detection_file: null
+detection_format: null        # coco | kitti; required when a detection file is set (declared, not inferred)
+rare_class_list: ""           # comma-separated, e.g. "person,bicycle"; required by logic in class_stratified
+
+# Flags
+save_embeddings: false
+visualize: false
