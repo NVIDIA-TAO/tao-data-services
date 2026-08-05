@@ -36,7 +36,9 @@ TAO_CHECKPOINT_EXTENSIONS = {".pth", ".ckpt"}
 
 def get_input_filepaths(input_parquet: str) -> List[str]:
     """Get the input filepaths from the input parquet.
-    Expects the input parquet to have a column `filepath`."""
+
+    Expects the input parquet to have a column `filepath`.
+    """
     df_column = pd.read_parquet(input_parquet, columns=['filepath'])
     # Convert the pandas Series to a Python list
     return df_column['filepath'].tolist()
@@ -45,7 +47,7 @@ def get_input_filepaths(input_parquet: str) -> List[str]:
 def get_batches(items, batch_size):
     """Split *items* into fixed-size chunks for batch processing."""
     return [
-        items[i : i + batch_size]
+        items[i:i + batch_size]
         for i in range(0, len(items), batch_size)
     ]
 
@@ -156,7 +158,8 @@ def main(cfg: ImageEmbeddingsConfig) -> None:
     """Takes in an input Parquet file with a `filepath` column and computes
     an embedding specified by the model parameter. It then stores
     the embedding in a new Parquet with 2 columns: `filepath`
-    and `embedding`."""
+    and `embedding`.
+    """
     _log_level = getattr(logging, getenv("TAO_LOGGING_LEVEL", "INFO").upper(), logging.INFO)
     logging.basicConfig(
         level=_log_level,

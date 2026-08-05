@@ -46,6 +46,7 @@ def _build_cfg(
     source_embed_column_name="embedding",
     target_embed_column_name="embedding",
     filter_by_label="false",
+    distance_threshold=-1.0,
 ):
     """Construct the OmegaConf cfg object ``main()`` expects."""
     return OmegaConf.create({
@@ -57,6 +58,7 @@ def _build_cfg(
         "source_embed_column_name": source_embed_column_name,
         "target_embed_column_name": target_embed_column_name,
         "filter_by_label": filter_by_label,
+        "distance_threshold": distance_threshold,
     })
 
 
@@ -209,7 +211,7 @@ def test_main_label_filter_drops_cross_label_pairs(tmp_path):
     # PASS target keeps src_a (PASS) only; NO_PASS target keeps src_d
     # (NO_PASS) only — mismatched labels are filtered out.
     assert mined == {"src_a.png", "src_d.png"}
-    assert "Label filtering" in _read_summary(out)
+    assert "After label mismatch filtering" in _read_summary(out)
 
 
 def test_main_label_filter_false_keeps_cross_label_pairs(tmp_path):
@@ -298,7 +300,6 @@ def test_main_honors_custom_embed_column_names(tmp_path):
 # End-to-end: known-answer test on a larger, deterministic input
 # ---------------------------------------------------------------------------
 
-
 def test_main_end_to_end_known_answer(tmp_path):
     """Full pipeline: 8 source vectors, 4 target vectors, top-2, cosine.
 
@@ -334,3 +335,107 @@ def test_main_end_to_end_known_answer(tmp_path):
     assert "Similar items per query: 2" in summary
     assert "Total candidates: 8" in summary
     assert f"Unique items saved: {len(mined)}" in summary
+    
+
+def test_distance_filter_disabled_when_negative(tmp_path):
+    """distance_threshold=-1.0 keeps all pairs regardless of distance; no summary line emitted."""
+    src = _write_parquet(
+        tmp_path / "s.parquet",
+        ["src_close.png", "src_far.png"],
+        np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+    )
+    tgt = _write_parquet(
+        tmp_path / "t.parquet", ["tgt.png"],
+        np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+    out = str(tmp_path / "mined.parquet")
+    cfg = _build_cfg(src, tgt, out, topn=2)  # distance_threshold defaults to -1.0
+    main(cfg)
+
+    assert set(pd.read_parquet(out)["filepath"].tolist()) == {"src_close.png", "src_far.png"}
+    assert "Distance filtering" not in _read_summary(out)
+
+
+def test_distance_filter_keeps_pair_at_exact_threshold(tmp_path):
+    """A pair whose distance equals the threshold exactly is kept (filter is strict >)."""
+    src = _write_parquet(
+        tmp_path / "s.parquet",
+        ["src_boundary.png", "src_far.png"],
+        np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+    )
+    tgt = _write_parquet(
+        tmp_path / "t.parquet", ["tgt.png"],
+        np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+    out = str(tmp_path / "mined.parquet")
+    cfg = _build_cfg(src, tgt, out, topn=2, knn_metric="euclidean", distance_threshold=1.0)
+    main(cfg)
+
+    mined = pd.read_parquet(out)["filepath"].tolist()
+    assert "src_boundary.png" in mined   
+    assert "src_far.png" not in mined   
+
+
+def test_distance_and_label_filters_cascade_correctly(tmp_path):
+    """With both filters active, distance counts are from label-passing pairs only.
+
+    Setup: 1 target (PASS), topn=3, threshold=1.5 (euclidean).
+      src_a [1,0]  PASS   dist=0.0  → passes label, passes distance  → kept
+      src_c [0,1]  NO_PASS dist=1.41 → fails label (skipped by distance check)
+      src_b [-1,0] PASS   dist=2.0  → passes label, fails distance   → dropped
+
+    Expected cascade:
+      Total pairs:        3
+      Label filtering:    kept 2/3,  dropped 1 mismatch
+      Distance filtering: kept 1/2,  dropped 1 exceeding threshold  (denominator=2, not 3)
+      Unique items saved: 1
+    """
+    src = _write_parquet(
+        tmp_path / "s.parquet",
+        ["src_a.png", "src_b.png", "src_c.png"],
+        np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        labels=["PASS", "PASS", "NO_PASS"],
+    )
+    tgt = _write_parquet(
+        tmp_path / "t.parquet", ["tgt.png"],
+        np.array([[1.0, 0.0]], dtype=np.float32),
+        labels=["PASS"],
+    )
+    out = str(tmp_path / "mined.parquet")
+    cfg = _build_cfg(
+        src, tgt, out, topn=3, knn_metric="euclidean",
+        filter_by_label="true", distance_threshold=1.5,
+    )
+    main(cfg)
+
+    assert pd.read_parquet(out)["filepath"].tolist() == ["src_a.png"]
+
+    summary = _read_summary(out)
+    assert "After label mismatch filtering: kept 2/3" in summary
+    assert "After distance filtering: kept 1/2" in summary
+    assert "Unique items saved: 1" in summary
+
+
+@pytest.mark.parametrize("metric,threshold", [
+    ("cosine", 0.5),
+    ("manhattan", 1.5),
+    ("euclidean", 1.0),
+])
+def test_distance_filter_works_across_metrics(tmp_path, metric, threshold):
+    """Distance filtering drops the far source under cosine, manhattan, and euclidean metrics."""
+    src = _write_parquet(
+        tmp_path / "s.parquet",
+        ["src_close.png", "src_far.png"],
+        np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+    )
+    tgt = _write_parquet(
+        tmp_path / "t.parquet", ["tgt.png"],
+        np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+    out = str(tmp_path / f"mined-{metric}.parquet")
+    cfg = _build_cfg(src, tgt, out, topn=2, knn_metric=metric, distance_threshold=threshold)
+    main(cfg)
+
+    mined = pd.read_parquet(out)["filepath"].tolist()
+    assert "src_close.png" in mined
+    assert "src_far.png" not in mined

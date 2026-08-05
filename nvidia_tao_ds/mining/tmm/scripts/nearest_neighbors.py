@@ -60,7 +60,20 @@ def main(cfg: NearestNeighborsConfig):
     source_embed_column_name = cfg.source_embed_column_name
     target_embed_column_name = cfg.target_embed_column_name
     filter_by_label = cfg.filter_by_label
+    distance_threshold = cfg.distance_threshold
 
+    if knn_metric == "cosine" and distance_threshold > 2.0:
+        logger.warning(
+            "The given distance threshold of %.4f exceeds the maximum cosine distance of 2.0 "
+            "— the filter will have no effect.",
+            distance_threshold,
+        )
+    if distance_threshold < 0 and distance_threshold != -1.0:
+        logger.warning(
+            "The given distance threshold of %.4f is negative, so distance filtering is disabled. "
+            "Use -1.0 to explicitly disable.",
+            distance_threshold,
+        )
     output_path = Path(output_parquet)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -98,9 +111,9 @@ def main(cfg: NearestNeighborsConfig):
     source_filepaths = df_source['filepath']
     label_filter_requested = str(filter_by_label).lower() in ("true", "1", "yes")
     do_label_filter = (
-        label_filter_requested
-        and 'label' in df_source.columns
-        and 'label' in df_target.columns
+        label_filter_requested and
+        'label' in df_source.columns and
+        'label' in df_target.columns
     )
 
     # Surface the case where the user asked for label filtering but
@@ -126,6 +139,7 @@ def main(cfg: NearestNeighborsConfig):
 
     all_neighbor_filepaths = []
     label_mismatch_count = 0
+    distance_exceeded_count = 0
     for i in range(len(target_embeddings)):
         for j in range(topn):
             neighbor_idx = indices[i, j]
@@ -135,20 +149,29 @@ def main(cfg: NearestNeighborsConfig):
                 if src_label != tgt_label:
                     label_mismatch_count += 1
                     continue
+            if 0 <= distance_threshold < float(distances[i, j]):
+                distance_exceeded_count += 1
+                continue
             all_neighbor_filepaths.append(source_filepaths[neighbor_idx])
 
+    total_pairs = len(target_embeddings) * topn
+    label_kept_count = total_pairs - label_mismatch_count
     label_filter_line = None
     if do_label_filter:
-        total_pairs = len(target_embeddings) * topn
         label_filter_line = (
-            f"Label filtering: kept {len(all_neighbor_filepaths)}/{total_pairs} pairs, "
+            f"After label mismatch filtering: kept {label_kept_count}/{total_pairs} pairs, "
             f"dropped {label_mismatch_count} mismatches"
         )
         logger.info(label_filter_line)
-
+    distance_filter_line = None
+    if distance_threshold >= 0:
+        distance_kept_count = label_kept_count - distance_exceeded_count
+        distance_filter_line = (
+            f"After distance filtering: kept {distance_kept_count}/{label_kept_count} pairs, "
+            f"dropped {distance_exceeded_count} exceeding threshold {distance_threshold:.4f}"
+        )
+        logger.info(distance_filter_line)
     # TODO: in the future, we can have other forms of filtering here
-    # like embeddings distances, talk to @jkalra
-
     logger.info("Saving results...")
     output_df = pd.DataFrame({"filepath": all_neighbor_filepaths})
     total_before = len(output_df)
@@ -160,14 +183,18 @@ def main(cfg: NearestNeighborsConfig):
         "Summary:",
         f"  Target queries: {len(df_target)}",
         f"  Similar items per query: {topn}",
+        f"  Total pairs: {total_pairs}",
+    ]
+    if label_filter_line is not None:
+        summary_lines.append(f"  {label_filter_line}")
+    if distance_filter_line is not None:
+        summary_lines.append(f"  {distance_filter_line}")
+    summary_lines += [
         f"  Total candidates: {total_before}",
         f"  Duplicates removed: {total_before - total_after}",
         f"  Unique items saved: {total_after}",
         f"  Results saved to: {output_parquet}",
     ]
-    if label_filter_line is not None:
-        summary_lines.append(label_filter_line)
-        summary_lines.append("")
     summary_text = "\n".join(summary_lines) + "\n"
 
     logger.info("\n%s", summary_text.strip())
@@ -175,6 +202,7 @@ def main(cfg: NearestNeighborsConfig):
     summary_path = output_path.parent / MINING_SUMMARY_TXT
     summary_path.write_text(summary_text, encoding="utf-8")
     logger.info("Summary written to: %s", summary_path)
+
 
 if __name__ == "__main__":
     main()
