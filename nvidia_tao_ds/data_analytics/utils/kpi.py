@@ -173,7 +173,7 @@ def _per_img_match(x, n_classes, sorting_algorithm, matching_iou_threshold, min_
                     non_match_count += 1
 
         T[idx].extend([1] * non_match_count)
-        P[idx].extend([0.0] * non_match_count)
+        P[idx].extend([-1.0] * non_match_count)
 
     return (T, P, TN)
 
