@@ -22,7 +22,9 @@ from nvidia_tao_ds.rcca.gap_analysis.scripts.object_detection import (
     match_boxes,
     select_weak_images,
     write_artifacts,
+    _calculate_ap50,
     _load_image_records,
+    _process_class,
     _process_image,
 )
 
@@ -223,6 +225,67 @@ class TestCalculateImageMetrics:
         assert math.isnan(row["precision"])
         assert math.isnan(row["recall"])
         assert math.isnan(row["ap50"])
+
+
+# ---------------------------------------------------------------------------
+# conf_threshold=0.0 correctness — guards against the kpi.py TP=GT-count bug
+#
+# In a buggy implementation undetected GT boxes are encoded with confidence 0.0
+# and then p >= conf_threshold (0.0 >= 0.0) makes them TPs, so FN is always 0
+# and recall is always 1.0.  These cases confirm our IoU-matching path is immune.
+# ---------------------------------------------------------------------------
+
+class TestConfThresholdBug:
+    def _run(self, gt_boxes, pred_records, conf_threshold=0.0, iou_threshold=0.5):
+        return _process_class(
+            "img1", "/img1.jpg", "kpi", "car",
+            gt_boxes, pred_records,
+            conf_threshold=conf_threshold, min_area=0, iou_threshold=iou_threshold,
+            gt_label_path="", pred_label_path="",
+        )
+
+    def test_zero_predictions_gives_fn_not_tp(self):
+        # 1 GT, 0 predictions — the decisive probe case.
+        # Buggy system: TP=1, FN=0, Re=1.0.  Correct: TP=0, FN=1, Re=0.0.
+        _, metric = self._run(gt_boxes=[[0, 0, 10, 10]], pred_records=[])
+        assert metric["tp"] == 0
+        assert metric["fn"] == 1
+        assert metric["recall"] == pytest.approx(0.0)
+
+    def test_zero_score_pred_no_overlap_is_not_tp(self):
+        # score=0.0, conf_threshold=0.0, IoU=0 → pred must not match the GT.
+        # Buggy system: 0.0 >= 0.0 makes it a TP regardless of geometry.
+        pred = [{"class": "car", "bbox": [100, 100, 110, 110], "score": 0.0}]
+        _, metric = self._run(gt_boxes=[[0, 0, 10, 10]], pred_records=pred)
+        assert metric["tp"] == 0
+        assert metric["fn"] == 1
+        assert metric["recall"] == pytest.approx(0.0)
+
+    def test_zero_score_pred_exact_overlap_is_tp(self):
+        # score=0.0 at threshold=0.0 with perfect IoU → legitimate TP.
+        # Confirms we don't over-correct by filtering zero-score predictions.
+        pred = [{"class": "car", "bbox": [0, 0, 10, 10], "score": 0.0}]
+        _, metric = self._run(gt_boxes=[[0, 0, 10, 10]], pred_records=pred)
+        assert metric["tp"] == 1
+        assert metric["fn"] == 0
+        assert metric["recall"] == pytest.approx(1.0)
+
+    def test_zero_score_pred_filtered_by_nonzero_threshold(self):
+        # score=0.0 filtered by conf_threshold=0.1 → pred dropped → GT becomes FN.
+        # The filtered pred must not count as FP either.
+        pred = [{"class": "car", "bbox": [0, 0, 10, 10], "score": 0.0}]
+        _, metric = self._run(
+            gt_boxes=[[0, 0, 10, 10]], pred_records=pred, conf_threshold=0.1
+        )
+        assert metric["tp"] == 0
+        assert metric["fp"] == 0
+        assert metric["fn"] == 1
+
+    def test_ap50_zero_predictions_returns_zero_not_one(self):
+        # AP=1.0 for a class the model never predicts is impossible under any
+        # valid definition.  _calculate_ap50 must return 0.0, not 1.0.
+        ap = _calculate_ap50(gt_boxes=[[0, 0, 10, 10]], pred_records=[])
+        assert ap == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
