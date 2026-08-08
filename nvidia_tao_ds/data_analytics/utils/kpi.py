@@ -336,7 +336,7 @@ def evaluate(gt_data_obj, pred_data_obj, cat_map, matching_iou_threshold=0.5, co
         TP, FP, FN, TN, precision, recall, accuracy, prec, rec = evaluate_class(per_img_match, gt_list, pred_list, conf_threshold)
 
         # Calculate Pascal VOC style AP
-        ap = voc_ap(np.array(prec), np.array(rec), "sample", num_recall_points)
+        ap = voc_ap(np.array(rec), np.array(prec), "sample", num_recall_points)
 
         stats.append({
             'class_name': class_name,
