@@ -109,7 +109,7 @@ subtasks are discovered from each command package's `scripts/` directory.
 | `augmentation` | `nvidia_tao_ds.augmentation.entrypoint.augment:main` | `generate` |
 | `auto_label` | `nvidia_tao_ds.auto_label.entrypoint.auto_label:main` | `generate` |
 | `embedding` | `nvidia_tao_ds.mining.embedding.entrypoint.embedding:main` | `image_embeddings`<br>`text_embeddings` |
-| `gap_analysis` | `nvidia_tao_ds.rcca.gap_analysis.entrypoint.gap_analysis:main` | `vcn_aoi`<br>`vlm_bcq` |
+| `gap_analysis` | `nvidia_tao_ds.rcca.gap_analysis.entrypoint.gap_analysis:main` | `object_detection`<br>`vcn_aoi`<br>`vlm_bcq` |
 | `image` | `nvidia_tao_ds.image.entrypoint.image:main` | `validate` |
 | `tmm` | `nvidia_tao_ds.mining.tmm.entrypoint.tmm:main` | `nearest_neighbors`<br>`unique_neighbor_matching` |
 

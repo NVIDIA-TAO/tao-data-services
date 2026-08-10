@@ -1,0 +1,16 @@
+ground_truth_ann_path: ???
+inference_ann_path: ???
+images_dir: ???
+results_dir: ???
+kpi: ???
+input_format: ???
+iou_threshold: 0.5
+conf_threshold: 0.0
+min_area: 0
+class_mapping: {}
+# Per-class thresholds: {class_name: {recall: float, precision: float, ap50: float}}
+# Example: {car: {recall: 0.9, precision: 0.8, ap50: 0.5}, pedestrian: {recall: 0.85}}
+weak_thresholds: {}
+default_recall_threshold: 0.5
+default_precision_threshold: 0.0
+default_ap50_threshold: 0.5
