@@ -109,7 +109,7 @@ def analyze(cfg):
 
     # Dump KPI into csv
     output_csv_path = os.path.join(cfg.results_dir, "kpi_calc.csv")
-    final_kpi_df[["Sequence Name", "TP", "FP", "FN", "TN", "Pr", "Re", "Acc", "AP"]].to_csv(output_csv_path, index=False)
+    final_kpi_df[["Sequence Name", "class_name", "TP", "FP", "FN", "TN", "Pr", "Re", "Acc", "AP"]].to_csv(output_csv_path, index=False)
 
     logger.info(resultTable)
 
