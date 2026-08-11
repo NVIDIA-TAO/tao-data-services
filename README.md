@@ -104,7 +104,7 @@ subtasks are discovered from each command package's `scripts/` directory.
 
 | Command | Python entry point | Script subtasks |
 | :--- | :--- | :--- |
-| `analytics` | `nvidia_tao_ds.data_analytics.entrypoint.analytics:main` | `analyze`<br>`example_per_image_analysis`<br>`kpi_analyze`<br>`kpi_analyze_per_image`<br>`validate` |
+| `analytics` | `nvidia_tao_ds.data_analytics.entrypoint.analytics:main` | `analyze`<br>`kpi_analyze`<br>`validate` |
 | `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice` |
 | `augmentation` | `nvidia_tao_ds.augmentation.entrypoint.augment:main` | `generate` |
 | `auto_label` | `nvidia_tao_ds.auto_label.entrypoint.auto_label:main` | `generate` |
