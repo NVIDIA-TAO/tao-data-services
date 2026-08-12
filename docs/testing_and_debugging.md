@@ -1,32 +1,47 @@
-# Testing And Debugging
+# Testing and Debugging
 
 This repository mixes static checks, unit tests, command dispatch tests,
-container checks, and GPU/data-sensitive workflows. Pick the smallest test that
+container checks, and GPU- and data-sensitive workflows. Pick the smallest test that
 covers your change.
 
-## GitLab Static Tests
+## Static Checks
 
-`.gitlab-ci.yml` runs the `static_tests` job in the TAO Data Services base
-image. The job now checks generated README drift before running
-`ci/run_static_tests.py`.
+CI runs static checks on pull requests through GitHub Actions
+(`.github/workflows/static-tests.yml`), which executes the repository's pre-commit
+hooks against the changed files:
 
-`ci/run_static_tests.py` runs:
+* SPDX license headers (`.github/hooks/check_license_header.py`)
+* `pylint` (`.pylintrc`), `pydocstyle`, and `flake8`, scoped to
+  `nvidia_tao_ds/`
+* The generated README drift check
+  (`tools/update_readme_supported_commands.py --check`)
 
-| Tool | Scope |
-| :--- | :--- |
-| `pylint --rcfile .pylintrc` | Modules listed in `ci/utils.py` `TEST_MODULES`. |
-| `pydocstyle --ignore=D4,D200,D203,D205,D210,D212,D213,D301,D400,D401` | Same module list. |
-| `flake8 --ignore=E24,W504,E501` | Same module list. |
+CI skips the `trufflehog` and `dependency-guard` hooks (secret scanning runs
+in the separate `secret-scan.yml` workflow); both still run in the local
+pre-commit hook, and `dependency-guard` requires explicit acknowledgment for
+requirements and Docker file changes.
 
-`ci/utils.py` resolves the Docker image from `docker/manifest.json` for local
-static runs. In CI it runs directly in the job image.
+Reproduce locally:
 
-## Docs-Only Validation
+```sh
+pip install pre-commit
+pre-commit install
+pre-commit run --from-ref origin/main --to-ref HEAD
+```
+
+Separate workflows enforce DCO sign-off on every commit (`dco.yml`), secret
+scanning (`secret-scan.yml`), and PR title format (`pr-title.yml`).
+Functional (GPU) tests run through the externally triggered `blossom-ci.yml`
+workflow, not on every push.
+
+## Documentation-Only Validation
+
+For documentation-only changes, run these checks:
 
 ```sh
 python tools/update_readme_supported_commands.py --check
 python -m py_compile tools/update_readme_supported_commands.py
-git diff --check -- README.md docs/*.md docs/assets/*.svg tools/*.py .pre-commit-config.yaml .gitlab-ci.yml
+git diff --check -- README.md docs/*.md docs/assets/*.svg tools/*.py .pre-commit-config.yaml
 rg -n "TBD|PLACEHOLDER|example\\.com" README.md docs
 ```
 
@@ -35,43 +50,66 @@ the normal blast radius for documentation-only changes.
 
 ## Targeted Pytest Map
 
-| Change Area | Suggested Tests |
+| Change area | Suggested tests |
 | :--- | :--- |
 | Config package moves or default spec support | `pytest tests/test_config_modules.py -q` |
-| Mining dispatchers | `pytest tests/mining/test_mining_entrypoints.py -q` |
-| Embedding logic | `pytest tests/mining/test_image_embeddings.py -q` |
-| Nearest-neighbor mining | `pytest tests/mining/test_nearest_neighbors.py -q` |
+| Shared launcher / exit-code behavior | `pytest tests/test_entrypoint_exit_code.py -q` |
+| Embedding logic | `pytest tests/mining/test_image_embeddings.py tests/mining/test_text_embeddings.py -q` |
+| Nearest-neighbor mining | `pytest tests/mining/test_nearest_neighbors.py tests/mining/test_unique_neighbor_matching.py -q` |
 | Annotation merge/slice | `pytest tests/test_merger_slicer.py -q` |
-| COCO/KITTI conversion | `pytest tests/test_coco_kitti_conversion.py tests/test_coco_odvg_conversion.py -q` |
-| AICity conversion | `pytest tests/test_aicity_ovpkl_conversion.py -q` |
+| COCO, KITTI, and ODVG conversion | `pytest tests/test_coco_kitti_conversion.py tests/test_coco_odvg_conversion.py -q` |
+| AICity / PAS conversions | `pytest tests/test_aicity_ovpkl_conversion.py tests/test_nvidia_paidf_pas_to_tao_clip_conversion.py -q` |
 | QA to LLaVA conversion | `pytest tests/test_qa_to_llava_annotation.py tests/test_llava_merger.py -q` |
 | Analytics | `pytest tests/test_data_analytics.py -q` |
-| Auto-label prompt and parsing logic | `pytest tests/autolabel -q` |
-| Logging changes | `pytest tests/test_dual_logging.py tests/test_baselogger_recursion.py -q` |
+| Auto-label VLM workflows | `pytest tests/autolabel -q` |
+| Auto-label Grounding DINO | `pytest tests/test_text2box.py -q` |
+| Gap analysis | `pytest tests/test_od_gap_analysis.py tests/test_vcn_aoi.py tests/test_vlm_bcq.py -q` |
+| Logging changes | `pytest tests/test_dual_logging.py -q` |
+| Dataset loading helpers | `pytest tests/test_dataset_loading.py -q` |
 
-`ci/run_functional_tests.py` runs `pytest tests -v --color=yes`. Use it when a
-change spans multiple domains and the environment has the needed dependencies.
+There is no `conftest.py` or pytest configuration file. Two skip conventions
+matter:
+
+* GPU- and data-heavy tests (`test_data_analytics.py`, `test_augment.py`) skip
+  themselves when `CI_PROJECT_DIR` is set, a GitLab-era guard that GitHub
+  Actions does not set. They need the private scratch datasets mounted.
+* Some analytics tests skip unless `WANDB_API_KEY` is set.
+
+A few tests stub or skip `nvidia_tao_core` imports; initialize the submodules
+before running the full suite.
 
 ## Common Failures
 
-| Symptom | Likely Cause | Where To Check |
+| Symptom | Likely cause | Where to check |
 | :--- | :--- | :--- |
-| `Experiment spec file was not found` | Standard entrypoint was called without a valid `-e` path. | `nvidia_tao_ds/core/entrypoint/entrypoint.py` |
-| Hydra cannot find a config | The script `config_name` does not match the YAML name or config path. | The target `scripts/*.py` `@hydra_runner(...)` |
-| `nvidia-smi` assertion failure | Requested `num_gpus` exceeds visible GPUs. | `launch()` GPU override logic and spec `gpu_ids` |
-| Docker pull or inspect fails | Local tag is missing or `docker/manifest.json` digest is stale/inaccessible. | `runner/tao_ds.py`, `docker/manifest.json` |
-| Default spec generation rejects a module | Config package shape is not supported by `default_specs.py`. | `nvidia_tao_ds/core/utils/default_specs.py` |
-| API action missing | Installed console scripts or `tao-core` module mappings do not expose it. | `setup.py`, `tao-core/nvidia_tao_core/api_utils/module_utils.py` |
-| W&B tests skip | `WANDB_API_KEY` is not set. | `tests/test_data_analytics.py` |
+| `Experiment spec file was not found` | The standard entry point ran without a valid `-e` path. | `nvidia_tao_ds/core/entrypoint/entrypoint.py` |
+| Hydra cannot find a config | The script `config_name` does not match the YAML name or config path. | The target `scripts/*.py` `@hydra_runner(...)`; for example, `augmentation generate` defaults to `kitti.yaml` |
+| `nvidia-smi` assertion failure | Requested `num_gpus` exceeds visible GPUs, or the host has no GPU (the launcher calls `nvidia-smi` unconditionally, even for CPU subtasks). | `launch()` GPU logic in the shared entrypoint |
+| Command reports FAIL despite exit 0 | The launcher also reads the last record of `results_dir/status.json`. | `_status_reports_failure` in the shared entrypoint |
+| New GPU subtask runs on one GPU only | Multi-GPU parsing is keyed on the subtask name `generate`. | `launch(multigpu_support=...)` |
+| Import errors for `nvidia_tao_core` / `nvidia_tao_pytorch` | Uninitialized submodules. | `git submodule update --init`; in containers `envsetup.sh` sets `PYTHONPATH` |
+| `default_specs` rejects a module | Only flat services are supported; mining and RCCA are not. | `nvidia_tao_ds/core/utils/default_specs.py` |
+| Docker pull or inspect fails | Local tag missing or `docker/manifest.json` digest stale/inaccessible. | `runner/tao_ds.py`, `docker/manifest.json` |
+| Video write fails or codec missing | The base image enforces an LGPL codec allow-list (VP9/mjpeg encode only). | `docker/Dockerfile`, `core/utils/video_utils.py` |
+| API action missing | Installed console scripts or tao-core module mappings do not expose it. | `setup.py`, tao-core `api_utils.module_utils` |
+| Weights and Biases tests skip | `WANDB_API_KEY` is not set. | `tests/test_data_analytics.py` |
 
 ## Debugging Runtime Commands
 
-Print the Docker command without hiding what will run:
+Run a command through the launcher:
 
 ```sh
-tao_ds --gpus all --volume "$PWD:/workspace" -- annotations convert -e nvidia_tao_ds/annotations/experiment_specs/annotations.yaml
+tao_ds --gpus all -- annotations convert -e nvidia_tao_ds/annotations/experiment_specs/annotations.yaml
 ```
 
-For standard entrypoints, command-line Hydra overrides follow the experiment
-spec. For mining and RCCA direct dispatchers, pass Hydra args directly to the
-subtask script through the dispatcher.
+The shared entrypoint launches each subtask as a fresh Python subprocess, so
+breakpoints set in a `scripts/*.py` are never hit through the console command.
+Debug in-process by running the script directly:
+
+```sh
+python nvidia_tao_ds/<service>/scripts/<subtask>.py \
+  --config-path /abs/path/to/spec/dir --config-name <spec_name>
+```
+
+Command-line Hydra overrides follow the experiment specification, for example,
+`results_dir=/results data.input_format=COCO`.

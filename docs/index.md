@@ -8,8 +8,9 @@ repository mental model, command flow, configuration flow, or validation map.
 
 ## Start Paths
 
-| Role | Start With | Then Read |
+| Role | Start with | Then read |
 | :--- | :--- | :--- |
+| New developer picking up the repository | [Codebase tour](codebase_tour.md) | [Architecture](architecture.md) |
 | Coding agent or new maintainer | [Agent onboarding](agent_onboarding.md) | [Architecture](architecture.md), [Testing and debugging](testing_and_debugging.md) |
 | Feature developer | [Development workflows](development_workflows.md) | [New data-service command](new_data_service_command.md) |
 | Container power user | [Container power users](container_power_users.md) | [Architecture](architecture.md) |
@@ -19,27 +20,28 @@ repository mental model, command flow, configuration flow, or validation map.
 
 | Document | Purpose |
 | :--- | :--- |
-| [agent_onboarding.md](agent_onboarding.md) | First-pass audit commands, worktree safety, and source-of-truth files. |
-| [architecture.md](architecture.md) | Runtime dispatch, Hydra config, API service, package layout, and extension points. |
-| [development_workflows.md](development_workflows.md) | Recipes for common source, config, Docker, release, and README changes. |
-| [testing_and_debugging.md](testing_and_debugging.md) | CI static checks, targeted pytest commands, GPU-sensitive paths, and failure triage. |
-| [container_power_users.md](container_power_users.md) | `tao_ds`, mounts, GPUs, base-image digests, service mode, and direct Docker equivalents. |
-| [new_data_service_command.md](new_data_service_command.md) | Source-backed guide for adding or extending commands and subtasks. |
+| [Codebase tour](codebase_tour.md) | Annotated repository tree, module map, service inventory, and the sharp edges new developers hit. |
+| [Agent onboarding](agent_onboarding.md) | First-pass audit commands, worktree safety, and source-of-truth files. |
+| [Architecture](architecture.md) | Runtime dispatch, Hydra config, models and weights, API service, and extension points. |
+| [Development workflows](development_workflows.md) | Recipes for common source, configuration, Docker, release, and README changes. |
+| [Testing and debugging](testing_and_debugging.md) | CI static checks, targeted pytest commands, GPU-sensitive paths, and failure triage. |
+| [Container power users](container_power_users.md) | `tao_ds`, mounts, GPUs, base-image digests, service mode, and direct Docker equivalents. |
+| [New data-service command](new_data_service_command.md) | Source-backed guide for adding or extending commands and subtasks. |
 
 ## Repository Anchors
 
-| Path | What To Look For |
+| Path | What to look for |
 | :--- | :--- |
-| `setup.py` | Package metadata and in-container console script entrypoints. |
-| `scripts/envsetup.sh` | `NV_TAO_DS_TOP` setup and the host-side `tao_ds` shell function. |
+| `setup.py` | Package metadata and in-container console script entry points. |
+| `scripts/envsetup.sh` | `NV_TAO_DS_TOP` setup, the host-side `tao_ds` shell function, and git-hook installation. |
 | `runner/tao_ds.py` | Docker launcher, GPU selection, mount handling, service mode, and manifest lookup. |
 | `nvidia_tao_ds/core/entrypoint/entrypoint.py` | Shared subtask discovery, experiment spec handling, GPU override handling, and subprocess launch. |
 | `nvidia_tao_ds/core/hydra/hydra_runner.py` | Local Hydra wrapper used by script modules. |
 | `nvidia_tao_ds/config/` | Dataclass-backed schemas and default-spec sources. |
 | `nvidia_tao_ds/*/experiment_specs/` | Example YAML specs used by script subtasks. |
-| `nvidia_tao_ds/api/app.py` | Flask API routes, job queue handoff, schema validation, and OpenAPI endpoints. |
+| `nvidia_tao_ds/api/app.py` | Dev-mode Flask API routes, job queue handoff, schema validation, and OpenAPI endpoints. |
 | `docker/manifest.json` | Immutable base-image registry, repository, and architecture-specific digests. |
-| `.gitlab-ci.yml` and `ci/` | Merge-request checks and static-test helpers. |
+| `.pre-commit-config.yaml` and `.github/workflows/` | Pull-request checks: lint, license headers, DCO, README drift, and secret scan. |
 
 ## Command Layers
 
@@ -59,7 +61,13 @@ launcher, or image-manifest metadata changes.
 
 ## Diagrams
 
+Architecture and workflow diagrams are checked in as SVG files under
+`docs/assets/` and embedded with normal Markdown image links. The SVG files are
+the canonical editable sources.
+
 | Diagram | Source |
 | :--- | :--- |
 | Runtime dispatch flow | [assets/runtime_flow.svg](assets/runtime_flow.svg) |
+| Configuration flow | [assets/config_flow.svg](assets/config_flow.svg) |
+| Package module map | [assets/module_map.svg](assets/module_map.svg) |
 | Container launch and build flow | [assets/container_flow.svg](assets/container_flow.svg) |
