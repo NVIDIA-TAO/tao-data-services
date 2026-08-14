@@ -7,7 +7,7 @@ the [Codebase tour](codebase_tour.md) first.
 ## What TAO Data Services Is
 
 TAO Data Services is the dataset-preparation backend of the TAO ecosystem: a
-set of GPU-accelerated services for annotation conversion, data augmentation,
+collection of dataset-preparation functions covering annotation conversion, data augmentation,
 auto-labeling, dataset analytics, data mining, and model-gap analysis. This
 repository is its source. It ships to users as one container,
 `nvcr.io/nvidia/tao/tao-toolkit:<version>-dataservices`, alongside the sibling
@@ -47,9 +47,9 @@ integration surfaces, not as the way users run the product.
 
 | Term | Meaning here |
 | :--- | :--- |
-| Service | One dataset-preparation domain with its own console command and package, such as `annotations` or `augmentation`. Also called a command family. |
-| Subtask | One operation of a service, implemented as one module in the service's `scripts/` package and selected as the first CLI argument: `annotations convert`, `analytics analyze`. |
-| Specification (spec) | The YAML experiment file passed with `-e`, validated against the service's dataclass schema. |
+| Function | One dataset-preparation capability with its own console command and package, such as `annotations` or `augmentation`. Functions are classified by compute: **GPU functions** (`augmentation`, `auto_label`, `embedding`, `tmm`) and **CPU functions** (`annotations`, `analytics`, `image`, `gap_analysis`). Despite the product name "Data Services," these are batch CLI functions, not long-running services. |
+| Subtask | One operation of a function, implemented as one module in the function's `scripts/` package and selected as the first CLI argument: `annotations convert`, `analytics analyze`. |
+| Specification (spec) | The YAML experiment file passed with `-e`, validated against the function's dataclass schema. |
 | Shared command dispatcher | `nvidia_tao_ds/core/entrypoint/entrypoint.py` — the in-repo code every console command delegates to. Not a product. |
 | `tao_ds` | The **development-only** container launcher defined by `scripts/envsetup.sh` (a shell function over `runner/tao_ds.py`). Users never see it; public docs reuse the name as a nickname for the data-services container itself. |
 | TAO Launcher | The removed `tao` CLI product (deprecated 6.0, removed 7.0). Not related to `tao_ds` or to the dispatcher above. |
@@ -71,12 +71,12 @@ runs the container in production:
 
 From here on the flow is identical for users and developers:
 
-4. `setup.py` installs one console script per service (`annotations`,
+4. `setup.py` installs one console script per function (`annotations`,
    `augmentation`, `auto_label`, `analytics`, `image`, `embedding`, `tmm`,
    `gap_analysis`).
 5. Every console script is a thin argparse shell over the shared command
    dispatcher in `nvidia_tao_ds/core/entrypoint/entrypoint.py`, which:
-   * Discovers subtask modules from the service's `scripts/` package and
+   * Discovers subtask modules from the function's `scripts/` package and
      injects the synthetic `default_specs` subtask.
    * Validates `-e/--experiment_spec_file` and converts it into Hydra
      `--config-path`/`--config-name` flags, passing unknown CLI tokens through
@@ -95,9 +95,9 @@ From here on the flow is identical for users and developers:
    `core/decorators.py` to create the results directory, write `status.json`,
    and map exceptions to user-facing status messages.
 
-## Command Families
+## Function Inventory
 
-| Command | Package | Dispatch pattern | Compute |
+| Function | Package | Dispatch pattern | Compute |
 | :--- | :--- | :--- | :--- |
 | `annotations` | `nvidia_tao_ds/annotations` | Shared dispatcher: `convert`, `merge`, `slice`, `qa_to_llava_annotation`. | CPU |
 | `augmentation` | `nvidia_tao_ds/augmentation` | Shared dispatcher; DALI pipelines; MPI path for multi-GPU `generate`. | GPU |
@@ -109,7 +109,7 @@ From here on the flow is identical for users and developers:
 | `gap_analysis` | `nvidia_tao_ds/rcca/gap_analysis` | Shared dispatcher: `object_detection`, `vcn_aoi`, `vlm_bcq`. | CPU |
 
 `get_subtasks()` wires a shared `default_specs` helper into every command, but
-it only works for the flat services (`annotations`, `augmentation`,
+it only works for the flat functions (`annotations`, `augmentation`,
 `auto_label`, `image`, `analytics`); `nvidia_tao_ds/core/utils/default_specs.py` does not support the nested
 mining and RCCA domains.
 
@@ -134,12 +134,12 @@ dataclass defaults -> experiment YAML (-e) -> command-line Hydra overrides
 
 Two schema conventions coexist:
 
-* **Flat services** keep their schemas in `config/<service>/`, anchored by a
+* **Flat functions** keep their schemas in `config/<function>/`, anchored by a
   `default_config.py::ExperimentConfig`. Subtasks may add sibling modules:
   `annotations` pairs `ExperimentConfig` (convert) with `merge_config.py` and
   `slice_config.py`, while `qa_to_llava_annotation` defines its configuration
   inline in the script.
-* **Newer nested services** (mining, rcca) define one configuration module per
+* **Newer nested functions** (mining, rcca) define one configuration module per
   subtask, named after the subtask (for example,
   `config/mining/tmm/nearest_neighbors.py::NearestNeighborsConfig`).
 
@@ -158,7 +158,7 @@ uses `config_name="annotations"`, `qa_to_llava_annotation` uses
 
 ## Models and Weights
 
-Data services orchestrate models from other TAO repositories rather than
+The functions orchestrate models from other TAO repositories rather than
 defining their own:
 
 | Consumer | Model | Source |
@@ -178,10 +178,10 @@ Grounding DINO and MAL configuration dataclasses imported from `nvidia_tao_core`
 | `nvidia_tao_ds/core/entrypoint/entrypoint.py` | Subtask discovery, spec path conversion, GPU override precedence, process launch, telemetry, log teeing, status-based failure detection. |
 | `nvidia_tao_ds/core/hydra/hydra_runner.py` | Local wrapper around Hydra's runner with schema registration and TAO-friendly logging overrides. |
 | `nvidia_tao_ds/core/decorators.py` | `@monitor_status` (results dir, `status.json`, error classification) and `@experimental`. |
-| `nvidia_tao_ds/core/utils/default_specs.py` | Default experiment YAML generation from dataclass configs (flat services only). |
+| `nvidia_tao_ds/core/utils/default_specs.py` | Default experiment YAML generation from dataclass configs (flat functions only). |
 | `nvidia_tao_ds/core/logging/` | `StatusLogger` and dual logging into `status.json`. |
 | `nvidia_tao_ds/core/llm_clients/` | `LLMClient` ABC, Gemini and OpenAI-compatible clients, `create_client` factory used by auto-label workflows. |
-| `nvidia_tao_ds/core/utils/dataset_loading.py` | Shared COCO/KITTI loading used across services. |
+| `nvidia_tao_ds/core/utils/dataset_loading.py` | Shared COCO/KITTI loading used across functions. |
 
 ## API Service (Legacy FTMS Integration)
 
@@ -228,7 +228,7 @@ Add a new workflow by choosing the smallest surface:
 
 | Change | Typical files |
 | :--- | :--- |
-| New subtask in an existing command | `nvidia_tao_ds/<service>/scripts/<subtask>.py`, `experiment_specs/`, `config/`, tests. Remember: multi-GPU only applies if the subtask is named `generate`, and `status.json` requires `@monitor_status`. |
+| New subtask in an existing command | `nvidia_tao_ds/<function>/scripts/<subtask>.py`, `experiment_specs/`, `config/`, tests. Remember: multi-GPU only applies if the subtask is named `generate`, and `status.json` requires `@monitor_status`. |
 | New top-level command | New package with `entrypoint/`, `scripts/`, `experiment_specs/`, a config package, a `setup.py` entry, tests, and a README-generator run. |
 | New API-visible action | Command/config support plus `api/app.py` and any tao-core module-utility mapping changes. |
 | New container dependency | `docker/requirements-pip.txt`, `docker/Dockerfile`, then `docker/build.sh` and a `docker/manifest.json` digest update after push. Video/codec dependencies must respect the FFmpeg codec allow-list baked into the Dockerfile. |

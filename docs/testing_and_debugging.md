@@ -120,7 +120,7 @@ before running the full suite.
 | Command reports FAIL despite exit 0 | The launcher also reads the last record of `results_dir/status.json`. | `_status_reports_failure` in the shared entrypoint |
 | New GPU subtask runs on one GPU only | Multi-GPU parsing is keyed on the subtask name `generate`. | `launch(multigpu_support=...)` |
 | Import errors for `nvidia_tao_core` / `nvidia_tao_pytorch` | Uninitialized submodules. | `git submodule update --init`; in containers `envsetup.sh` sets `PYTHONPATH` |
-| `default_specs` rejects a module | Only flat services are supported; mining and RCCA are not. | `nvidia_tao_ds/core/utils/default_specs.py` |
+| `default_specs` rejects a module | Only flat functions are supported; mining and RCCA are not. | `nvidia_tao_ds/core/utils/default_specs.py` |
 | Docker pull or inspect fails | Local tag missing or `docker/manifest.json` digest stale/inaccessible. | `runner/tao_ds.py`, `docker/manifest.json` |
 | Video write fails or codec missing | The base image enforces an LGPL codec allow-list (VP9/mjpeg encode only). | `docker/Dockerfile`, `core/utils/video_utils.py` |
 | API action missing | Installed console scripts or tao-core module mappings do not expose it. | `setup.py`, tao-core `api_utils.module_utils` |
@@ -139,7 +139,7 @@ breakpoints set in a `scripts/*.py` are never hit through the console command.
 Debug in-process by running the script directly:
 
 ```sh
-python nvidia_tao_ds/<service>/scripts/<subtask>.py \
+python nvidia_tao_ds/<function>/scripts/<subtask>.py \
   --config-path /abs/path/to/spec/dir --config-name <spec_name>
 ```
 

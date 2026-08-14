@@ -25,7 +25,7 @@ read the opening sections of [Architecture](architecture.md).
 
 | Document | Purpose |
 | :--- | :--- |
-| [Codebase tour](codebase_tour.md) | Annotated repository tree, module map, service inventory, and the sharp edges new developers hit. |
+| [Codebase tour](codebase_tour.md) | Annotated repository tree, module map, function inventory, and the sharp edges new developers hit. |
 | [Agent onboarding](agent_onboarding.md) | First-pass audit commands, worktree safety, and source-of-truth files. |
 | [Architecture](architecture.md) | Runtime dispatch, Hydra config, models and weights, API service, and extension points. |
 | [Development workflows](development_workflows.md) | Recipes for common source, configuration, Docker, release, and README changes. |

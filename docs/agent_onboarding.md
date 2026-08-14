@@ -10,7 +10,8 @@ full directory walk, read the [Codebase tour](codebase_tour.md).
 image from `docker/manifest.json`, mounts this source tree at `/workspace`, and
 executes any command passed after `--`.
 
-Inside the container, `setup.py` installs one console script per service:
+Inside the container, `setup.py` installs one console script per function
+(refer to Terminology in [Architecture](architecture.md)):
 `annotations`, `augmentation`, `analytics`, `auto_label`, `image`,
 `gap_analysis`, `tmm`, and `embedding`. All of them use the shared command dispatcher in
 `nvidia_tao_ds/core/entrypoint/entrypoint.py` to discover subtasks from
@@ -20,9 +21,9 @@ a fresh Python subprocess under Hydra.
 ```text
 console command (setup.py)
   -> nvidia_tao_ds/core/entrypoint/entrypoint.py
-  -> nvidia_tao_ds/<service>/scripts/<subtask>.py   (fresh subprocess)
-  -> Hydra spec validated against nvidia_tao_ds/config/<service>/
-  -> service logic (conversion, DALI, model inference, mining, ...)
+  -> nvidia_tao_ds/<function>/scripts/<subtask>.py   (fresh subprocess)
+  -> Hydra spec validated against nvidia_tao_ds/config/<function>/
+  -> function logic (conversion, DALI, model inference, mining, ...)
 ```
 
 ## First Pass
@@ -58,10 +59,10 @@ git submodule update --init
 | Which package commands exist? | `setup.py` `console_scripts` |
 | Which host launcher flags exist? | `runner/tao_ds.py` `parse_cli_args` |
 | Which base image is pulled? | `docker/manifest.json` |
-| Which subtasks exist? | `nvidia_tao_ds/<service>/scripts/*.py` |
-| Which example specs exist? | `nvidia_tao_ds/<service>/experiment_specs/*.yaml` |
+| Which subtasks exist? | `nvidia_tao_ds/<function>/scripts/*.py` |
+| Which example specs exist? | `nvidia_tao_ds/<function>/experiment_specs/*.yaml` |
 | Which specification template does a subtask load? | The script's `@hydra_runner(config_name=...)`, not the subtask name |
-| Which dataclass schema is used? | `nvidia_tao_ds/config/<service>/...` (`analytics` is the configuration package for `data_analytics/`) |
+| Which dataclass schema is used? | `nvidia_tao_ds/config/<function>/...` (`analytics` is the configuration package for `data_analytics/`) |
 | Which static tests run in CI? | `.pre-commit-config.yaml` via `.github/workflows/static-tests.yml` |
 | Which README content is generated? | `tools/update_readme_supported_commands.py` |
 

@@ -6,7 +6,7 @@ each directory is for, how the Python package is organized into modules, and
 where the sharp edges are.
 
 For what the product is, how customers run it, and definitions of the terms
-used below (service, subtask, dispatcher, `tao_ds`), read the opening sections
+used below (function, subtask, dispatcher, `tao_ds`), read the opening sections
 of [Architecture](architecture.md) first; this repository builds the
 `nvcr.io/nvidia/tao/tao-toolkit:<version>-dataservices` container, and the
 console commands below are its user-facing surface.
@@ -26,7 +26,7 @@ tao-dataservices/
 │   ├── mining/               # embedding (CLIP/SigLIP -> parquet) and tmm (RAPIDS nearest-neighbor mining)
 │   ├── rcca/                 # gap_analysis: model-failure / coverage analysis
 │   ├── core/                 # Shared command dispatcher, Hydra runner, decorators, logging, LLM clients
-│   ├── config/               # Hydra dataclass schemas, one package per service
+│   ├── config/               # Hydra dataclass schemas, one package per function
 │   ├── api/                  # Dev-mode Flask API (refer to the API section in Architecture)
 │   ├── backbone/             # Vendored FAN/ConvNeXt/Swin/ViT code (legacy, unused elsewhere)
 │   └── dataclass_to_rst/     # Doc tooling: config dataclasses -> RST tables for public docs
@@ -41,7 +41,7 @@ tao-dataservices/
 ├── .github/                  # GitHub Actions workflows and shared hook scripts
 ├── tao-core/                 # Git submodule: shared TAO config/microservice/telemetry code
 ├── tao-pytorch/              # Git submodule: model code consumed by auto_label and embedding
-├── setup.py                  # Package definition and console_scripts (one per service)
+├── setup.py                  # Package definition and console_scripts (one per function)
 └── Makefile                  # Wheel build targets (build, install, develop, clean)
 ```
 
@@ -57,22 +57,25 @@ The rules of thumb are:
 
 | Module | Role | Key files |
 | :--- | :--- | :--- |
-| `<service>/entrypoint/` | An approximately 35-line argparse shell delegating to the shared dispatcher. | For example, `annotations/entrypoint/annotations.py` |
-| `<service>/scripts/` | One module per subtask; each owns its `@hydra_runner(...)` declaration. | For example, `annotations/scripts/convert.py` |
-| `<service>/experiment_specs/` | Example YAML specifications selected by `-e`. | For example, `annotations/experiment_specs/annotations.yaml` |
+| `<function>/entrypoint/` | An approximately 35-line argparse shell delegating to the shared dispatcher. | For example, `annotations/entrypoint/annotations.py` |
+| `<function>/scripts/` | One module per subtask; each owns its `@hydra_runner(...)` declaration. | For example, `annotations/scripts/convert.py` |
+| `<function>/experiment_specs/` | Example YAML specifications selected by `-e`. | For example, `annotations/experiment_specs/annotations.yaml` |
 | `core/entrypoint/entrypoint.py` | The shared command dispatcher: subtask discovery, spec-to-Hydra translation, GPU handling, subprocess launch, telemetry, and status-based failure detection. | `get_subtasks`, `launch` |
 | `core/hydra/hydra_runner.py` | Schema registration and Hydra invocation. | `hydra_runner` decorator |
 | `core/decorators.py` | `@monitor_status` (results dir, `status.json`, error classification) and `@experimental`. | |
 | `core/logging/` | `StatusLogger`, dual logging into `status.json`. | `logging.py` |
 | `core/llm_clients/` | LLM/VLM client abstraction used by auto-label workflows. | `LLMClient` ABC, `GeminiClient`, `OpenAICompatibleClient`, and the `create_client` factory |
 | `core/utils/` | `default_specs` pseudo-subtask, shared COCO/KITTI loading, video helpers. | `default_specs.py`, `dataset_loading.py`, `video_utils.py` |
-| `config/<service>/` | Dataclass schemas (refer to [Two Configuration Conventions](#two-configuration-conventions)). | `default_config.py` and per-subtask modules |
+| `config/<function>/` | Dataclass schemas (refer to [Two Configuration Conventions](#two-configuration-conventions)). | `default_config.py` and per-subtask modules |
 | `config/utils/types.py` | Typed field factories (`STR_FIELD`, `INT_FIELD`, `DATACLASS_FIELD`, ...) that attach UI/validation metadata. | |
-| `api/` | Dev-mode Flask app exposing services as API actions. | `app.py`, `openapi.json` |
+| `api/` | Dev-mode Flask app exposing the functions as API actions. | `app.py`, `openapi.json` |
 
-## Service Inventory
+## Function Inventory
 
-Each console script (registered in `setup.py`) maps to one service package:
+Despite the product name "Data Services," the units of this repository are
+batch CLI **functions**, not long-running services; they are classified by
+compute as GPU functions or CPU functions. Each console script (registered in
+`setup.py`) maps to one function package:
 
 | Command | Package | Subtasks | Runs on |
 | :--- | :--- | :--- | :--- |
@@ -95,7 +98,7 @@ The `auto_label generate` subtask fans out on `cfg.autolabel_type`:
 | `image_referring_expression` | VLM four-step referring-expression workflow | Remote VLM |
 | `video_reasoning_annotation` | Multi-step video captioning/QA workflow | Remote VLM + LLM |
 
-## Anatomy of One Service: `annotations`
+## Anatomy of One Function: `annotations`
 
 ```text
 nvidia_tao_ds/annotations/
@@ -141,12 +144,12 @@ directly with `--config-path`/`--config-name` to debug it in-process.
 
 The configuration tree has two generations of layout:
 
-* **Flat (older services):** Schemas live in `config/<service>/`, anchored by
+* **Flat (older functions):** Schemas live in `config/<function>/`, anchored by
   `default_config.py::ExperimentConfig`: `annotations`, `augmentation`,
   `auto_label`, `image`, and `analytics` (the schema package for
   `data_analytics/`). Subtasks may add sibling modules; `annotations` pairs
   `ExperimentConfig` (convert) with `merge_config.py` and `slice_config.py`.
-* **Per-subtask (newer services):** One configuration module per subtask:
+* **Per-subtask (newer functions):** One configuration module per subtask:
   `config/mining/embedding/image_embeddings.py` (`ImageEmbeddingsConfig`),
   `config/mining/tmm/nearest_neighbors.py` (`NearestNeighborsConfig`),
   `config/rcca/gap_analysis/*.py`, and so on.
@@ -164,8 +167,8 @@ The following behaviors surprise every new developer; they are collected in one 
   is `config/analytics/`. `core/utils/default_specs.py` carries an explicit
   alias map to reconcile them.
 * **`default_specs` does not support mining or rcca.** It only recognizes
-  services with a flat `nvidia_tao_ds/<dir>/entrypoint/` layout and a
-  `config/<dir>/default_config.py`. The nested `mining/*` and `rcca/*` services
+  functions with a flat `nvidia_tao_ds/<dir>/entrypoint/` layout and a
+  `config/<dir>/default_config.py`. The nested `mining/*` and `rcca/*` functions
   fail with "Module ... is not supported" even though `default_specs` appears
   in their subtask lists.
 * **Every command requires `nvidia-smi`**, including pure-CPU ones; the shared
