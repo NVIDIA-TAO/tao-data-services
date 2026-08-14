@@ -12,7 +12,7 @@ executes any command passed after `--`.
 
 Inside the container, `setup.py` installs one console script per service:
 `annotations`, `augmentation`, `analytics`, `auto_label`, `image`,
-`gap_analysis`, `tmm`, and `embedding`. All of them use the shared launcher in
+`gap_analysis`, `tmm`, and `embedding`. All of them use the shared command dispatcher in
 `nvidia_tao_ds/core/entrypoint/entrypoint.py` to discover subtasks from
 `scripts/`, require `-e/--experiment_spec_file`, and run the selected script as
 a fresh Python subprocess under Hydra.
@@ -69,8 +69,8 @@ git submodule update --init
 
 | Question | Where to look |
 | :--- | :--- |
-| Where is the shared launcher behavior (GPU handling, subprocess, telemetry)? | `nvidia_tao_ds/core/entrypoint/entrypoint.py` |
-| Why does a CPU command need a GPU host? | The launcher calls `nvidia-smi` unconditionally |
+| Where is the shared dispatcher behavior (GPU handling, subprocess, telemetry)? | `nvidia_tao_ds/core/entrypoint/entrypoint.py` |
+| Why does a CPU command need a GPU host? | The dispatcher calls `nvidia-smi` unconditionally |
 | Why does my new subtask ignore `num_gpus`? | Multi-GPU is keyed on the literal subtask name `generate` |
 | Why is there no `status.json` for a subtask? | The script lacks `@monitor_status`; refer to the coverage list in the [Codebase tour](codebase_tour.md) |
 | Which model does auto-label use? | `auto_label/scripts/generate.py` dispatches on `cfg.autolabel_type` |

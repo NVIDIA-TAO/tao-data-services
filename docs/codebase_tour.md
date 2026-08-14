@@ -3,8 +3,13 @@
 This is a guided walk through the TAO Data Services repository for developers
 picking up the codebase for the first time. It answers three questions: what
 each directory is for, how the Python package is organized into modules, and
-where the sharp edges are. For the runtime and data-flow view, read
-[Architecture](architecture.md) next.
+where the sharp edges are.
+
+For what the product is, how customers run it, and definitions of the terms
+used below (service, subtask, dispatcher, `tao_ds`), read the opening sections
+of [Architecture](architecture.md) first; this repository builds the
+`nvcr.io/nvidia/tao/tao-toolkit:<version>-dataservices` container, and the
+console commands below are its user-facing surface.
 
 ![TAO Data Services module map](assets/module_map.svg)
 
@@ -20,7 +25,7 @@ tao-dataservices/
 │   ├── image/                # Corrupted-image validation (CPU)
 │   ├── mining/               # embedding (CLIP/SigLIP -> parquet) and tmm (RAPIDS nearest-neighbor mining)
 │   ├── rcca/                 # gap_analysis: model-failure / coverage analysis
-│   ├── core/                 # Shared launcher, Hydra runner, decorators, logging, LLM clients
+│   ├── core/                 # Shared command dispatcher, Hydra runner, decorators, logging, LLM clients
 │   ├── config/               # Hydra dataclass schemas, one package per service
 │   ├── api/                  # Dev-mode Flask API (refer to the API section in Architecture)
 │   ├── backbone/             # Vendored FAN/ConvNeXt/Swin/ViT code (legacy, unused elsewhere)
@@ -52,10 +57,10 @@ The rules of thumb are:
 
 | Module | Role | Key files |
 | :--- | :--- | :--- |
-| `<service>/entrypoint/` | An approximately 35-line argparse shell delegating to the shared launcher. | For example, `annotations/entrypoint/annotations.py` |
+| `<service>/entrypoint/` | An approximately 35-line argparse shell delegating to the shared dispatcher. | For example, `annotations/entrypoint/annotations.py` |
 | `<service>/scripts/` | One module per subtask; each owns its `@hydra_runner(...)` declaration. | For example, `annotations/scripts/convert.py` |
 | `<service>/experiment_specs/` | Example YAML specifications selected by `-e`. | For example, `annotations/experiment_specs/annotations.yaml` |
-| `core/entrypoint/entrypoint.py` | The shared launcher: subtask discovery, spec-to-Hydra translation, GPU handling, subprocess launch, telemetry, and status-based failure detection. | `get_subtasks`, `launch` |
+| `core/entrypoint/entrypoint.py` | The shared command dispatcher: subtask discovery, spec-to-Hydra translation, GPU handling, subprocess launch, telemetry, and status-based failure detection. | `get_subtasks`, `launch` |
 | `core/hydra/hydra_runner.py` | Schema registration and Hydra invocation. | `hydra_runner` decorator |
 | `core/decorators.py` | `@monitor_status` (results dir, `status.json`, error classification) and `@experimental`. | |
 | `core/logging/` | `StatusLogger`, dual logging into `status.json`. | `logging.py` |
@@ -94,7 +99,7 @@ The `auto_label generate` subtask fans out on `cfg.autolabel_type`:
 
 ```text
 nvidia_tao_ds/annotations/
-├── entrypoint/annotations.py     # argparse shell -> core launcher
+├── entrypoint/annotations.py     # argparse shell -> shared dispatcher
 ├── scripts/convert.py            # @hydra_runner(config_name="annotations", schema=ExperimentConfig)
 ├── scripts/{merge,slice,qa_to_llava_annotation}.py
 ├── conversion/                   # The format-conversion engine
@@ -163,8 +168,8 @@ The following behaviors surprise every new developer; they are collected in one 
   `config/<dir>/default_config.py`. The nested `mining/*` and `rcca/*` services
   fail with "Module ... is not supported" even though `default_specs` appears
   in their subtask lists.
-* **Every command requires `nvidia-smi`**, including pure-CPU ones — the shared
-  launcher unconditionally counts GPUs. The CLI cannot run on a GPU-less host.
+* **Every command requires `nvidia-smi`**, including pure-CPU ones; the shared
+  dispatcher unconditionally counts GPUs. The CLI cannot run on a GPU-less host.
 * **Multi-GPU parsing is keyed on the literal subtask name `generate`.**
   `launch(multigpu_support=['generate'], ...)` — a new GPU subtask with any
   other name silently runs single-GPU and ignores spec-level
@@ -174,7 +179,7 @@ The following behaviors surprise every new developer; they are collected in one 
   annotations `convert`/`merge`/`slice`, `augmentation generate`,
   `auto_label generate`, analytics `analyze`/`validate`, and `image validate`
   — and absent on `qa_to_llava_annotation`, `kpi_analyze`, all of `mining/*`,
-  and all of `rcca/*`. For the latter group the launcher's status-based
+  and all of `rcca/*`. For the latter group the dispatcher's status-based
   failure check is a no-op.
 * **`augmentation`'s default `config_name` is `"kitti"`**, not `generate`; its
   `experiment_specs/` holds `kitti.yaml` and `coco.yaml`. Always read the

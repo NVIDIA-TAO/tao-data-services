@@ -1,14 +1,66 @@
 # Architecture
 
-TAO Data Services is a source package plus a Dockerized runtime. Host users
-enter through `tao_ds`; in-container users enter through package console
-scripts. This guide explains the runtime dispatch, configuration flow, model
-usage, and service boundaries. For a directory-level orientation, read the
-[Codebase tour](codebase_tour.md) first.
+This guide explains what TAO Data Services is, how customers run it, and how a
+command flows through the source code. For a directory-level orientation, read
+the [Codebase tour](codebase_tour.md) first.
+
+## What TAO Data Services Is
+
+TAO Data Services is the dataset-preparation backend of the TAO ecosystem: a
+set of GPU-accelerated services for annotation conversion, data augmentation,
+auto-labeling, dataset analytics, data mining, and model-gap analysis. This
+repository is its source. It ships to users as one container,
+`nvcr.io/nvidia/tao/tao-toolkit:<version>-dataservices`, alongside the sibling
+backends built from tao-pytorch (training) and tao-deploy (TensorRT inference).
+
+The product surface is the set of console commands this package installs
+(`annotations`, `augmentation`, `auto_label`, `analytics`, `image`,
+`embedding`, `tmm`, `gap_analysis`) plus their subtasks. Everything else in
+this repository exists to build, validate, or develop that container.
+
+## How Users Run Data Services
+
+As of TAO 7.0 there is one supported user surface, with the container CLI
+underneath it:
+
+1. **Agent and TAO skills (current).** Users load the `tao-skills` plugin in a
+   coding agent and ask for the outcome ("convert these COCO annotations to
+   KITTI"). The skills and the TAO Execution SDK dispatch a job to the user's
+   compute backend (local Docker, DGX Cloud Lepton, Brev, SLURM, or
+   Kubernetes), which runs the data-services container and invokes the same
+   console commands documented here.
+2. **Container CLI (the layer underneath).** Inside the
+   `<version>-dataservices` container, users or automation run the commands
+   directly: `annotations convert -e spec.yaml`, `embedding image_embeddings
+   -e spec.yaml`, and so on. The public data-mining and auto-label
+   documentation shows this form.
+
+Two older surfaces were **removed in TAO 7.0** and should not appear in new
+code or documentation: the **TAO Launcher** (`tao dataset annotations convert
+...`, deprecated in 6.0) and **FTMS** (the Fine-Tuning MicroService REST API
+plus the `nvidia-tao-client` CLI/SDK). This repository still contains
+FTMS-era code paths (`nvidia_tao_ds/api/`, the microservice `CMD` in the
+release Dockerfile, `JOB_ID`-gated log teeing); treat them as legacy
+integration surfaces, not as the way users run the product.
+
+## Terminology
+
+| Term | Meaning here |
+| :--- | :--- |
+| Service | One dataset-preparation domain with its own console command and package, such as `annotations` or `augmentation`. Also called a command family. |
+| Subtask | One operation of a service, implemented as one module in the service's `scripts/` package and selected as the first CLI argument: `annotations convert`, `analytics analyze`. |
+| Specification (spec) | The YAML experiment file passed with `-e`, validated against the service's dataclass schema. |
+| Shared command dispatcher | `nvidia_tao_ds/core/entrypoint/entrypoint.py` — the in-repo code every console command delegates to. Not a product. |
+| `tao_ds` | The **development-only** container launcher defined by `scripts/envsetup.sh` (a shell function over `runner/tao_ds.py`). Users never see it; public docs reuse the name as a nickname for the data-services container itself. |
+| TAO Launcher | The removed `tao` CLI product (deprecated 6.0, removed 7.0). Not related to `tao_ds` or to the dispatcher above. |
+| FTMS | The removed Fine-Tuning MicroService REST API and `nvidia-tao-client`. Its in-repo remnants are noted above. |
+
+## Developer Runtime: From Console Command to Script
 
 ![Runtime dispatch flow](assets/runtime_flow.svg)
 
-## Runtime Dispatch
+For development, `tao_ds` (dev-only, see Terminology) stands in for whatever
+runs the container in production:
 
 1. `source scripts/envsetup.sh` exports `NV_TAO_DS_TOP` and defines `tao_ds`.
 2. `tao_ds` runs `runner/tao_ds.py`, resolves the base image from
@@ -16,11 +68,14 @@ usage, and service boundaries. For a directory-level orientation, read the
    Docker with the requested GPUs, mounts, environment variables, shared
    memory, ulimits, UID/GID, and optional service-mode ports.
 3. Commands after `tao_ds --` execute inside the container.
+
+From here on the flow is identical for users and developers:
+
 4. `setup.py` installs one console script per service (`annotations`,
    `augmentation`, `auto_label`, `analytics`, `image`, `embedding`, `tmm`,
    `gap_analysis`).
-5. Every console script is a thin argparse shell over the shared launcher in
-   `nvidia_tao_ds/core/entrypoint/entrypoint.py`, which:
+5. Every console script is a thin argparse shell over the shared command
+   dispatcher in `nvidia_tao_ds/core/entrypoint/entrypoint.py`, which:
    * Discovers subtask modules from the service's `scripts/` package and
      injects the synthetic `default_specs` subtask.
    * Validates `-e/--experiment_spec_file` and converts it into Hydra
@@ -44,14 +99,14 @@ usage, and service boundaries. For a directory-level orientation, read the
 
 | Command | Package | Dispatch pattern | Compute |
 | :--- | :--- | :--- | :--- |
-| `annotations` | `nvidia_tao_ds/annotations` | Shared launcher: `convert`, `merge`, `slice`, `qa_to_llava_annotation`. | CPU |
-| `augmentation` | `nvidia_tao_ds/augmentation` | Shared launcher; DALI pipelines; MPI path for multi-GPU `generate`. | GPU |
-| `auto_label` | `nvidia_tao_ds/auto_label` | Shared launcher; `torchrun` path for multi-GPU `generate`; fans out on `autolabel_type`. | GPU or remote LLM |
-| `analytics` | `nvidia_tao_ds/data_analytics` | Shared launcher: `analyze`, `validate`, `kpi_analyze`. Config package is named `analytics`. | CPU |
-| `image` | `nvidia_tao_ds/image` | Shared launcher: `validate` (corrupted-image removal). | CPU |
-| `embedding` | `nvidia_tao_ds/mining/embedding` | Shared launcher: `image_embeddings`, `text_embeddings` (CLIP and SigLIP to Parquet). | GPU |
-| `tmm` | `nvidia_tao_ds/mining/tmm` | Shared launcher: `nearest_neighbors`, `unique_neighbor_matching` (RAPIDS). | GPU |
-| `gap_analysis` | `nvidia_tao_ds/rcca/gap_analysis` | Shared launcher: `object_detection`, `vcn_aoi`, `vlm_bcq`. | CPU |
+| `annotations` | `nvidia_tao_ds/annotations` | Shared dispatcher: `convert`, `merge`, `slice`, `qa_to_llava_annotation`. | CPU |
+| `augmentation` | `nvidia_tao_ds/augmentation` | Shared dispatcher; DALI pipelines; MPI path for multi-GPU `generate`. | GPU |
+| `auto_label` | `nvidia_tao_ds/auto_label` | Shared dispatcher; `torchrun` path for multi-GPU `generate`; fans out on `autolabel_type`. | GPU or remote LLM |
+| `analytics` | `nvidia_tao_ds/data_analytics` | Shared dispatcher: `analyze`, `validate`, `kpi_analyze`. Config package is named `analytics`. | CPU |
+| `image` | `nvidia_tao_ds/image` | Shared dispatcher: `validate` (corrupted-image removal). | CPU |
+| `embedding` | `nvidia_tao_ds/mining/embedding` | Shared dispatcher: `image_embeddings`, `text_embeddings` (CLIP and SigLIP to Parquet). | GPU |
+| `tmm` | `nvidia_tao_ds/mining/tmm` | Shared dispatcher: `nearest_neighbors`, `unique_neighbor_matching` (RAPIDS). | GPU |
+| `gap_analysis` | `nvidia_tao_ds/rcca/gap_analysis` | Shared dispatcher: `object_detection`, `vcn_aoi`, `vlm_bcq`. | CPU |
 
 `get_subtasks()` wires a shared `default_specs` helper into every command, but
 it only works for the flat services (`annotations`, `augmentation`,
@@ -66,7 +121,7 @@ Most command scripts combine four pieces:
 
 | Layer | Example | Purpose |
 | :--- | :--- | :--- |
-| Entrypoint wrapper | `nvidia_tao_ds/annotations/entrypoint/annotations.py` | Parses the subtask and delegates to the shared launcher. |
+| Entrypoint wrapper | `nvidia_tao_ds/annotations/entrypoint/annotations.py` | Parses the subtask and delegates to the shared dispatcher. |
 | Script subtask | `nvidia_tao_ds/annotations/scripts/convert.py` | Owns task logic and the `@hydra_runner(...)` declaration. |
 | Experiment spec | `nvidia_tao_ds/annotations/experiment_specs/annotations.yaml` | Example YAML selected by `-e` or direct Hydra overrides. |
 | Dataclass schema | `nvidia_tao_ds/config/annotations/default_config.py` | Structured defaults and schema used by Hydra, the API, and default-spec generation. |
@@ -128,10 +183,11 @@ Grounding DINO and MAL configuration dataclasses imported from `nvidia_tao_core`
 | `nvidia_tao_ds/core/llm_clients/` | `LLMClient` ABC, Gemini and OpenAI-compatible clients, `create_client` factory used by auto-label workflows. |
 | `nvidia_tao_ds/core/utils/dataset_loading.py` | Shared COCO/KITTI loading used across services. |
 
-## API Service
+## API Service (Legacy FTMS Integration)
 
-There are two API stories, and confusing them is the most common orientation
-mistake in this repo:
+FTMS was removed as a product surface in TAO 7.0, but its integration code is
+still in this repository. There are two API stories, and confusing them is the
+most common orientation mistake in this repository:
 
 * **Dev-mode API:** `nvidia_tao_ds/api/app.py` is a self-contained Flask app
   exposing neural-network action discovery, schema lookup, action submission,

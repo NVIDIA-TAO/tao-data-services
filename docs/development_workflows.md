@@ -61,9 +61,9 @@ find tests -name '*annotation*' -o -name '*merger*' | sort
 7. Run `python tools/update_readme_supported_commands.py` if command metadata,
    subtask files, launcher options, or image digests changed.
 
-When adding a subtask, remember two launcher behaviors keyed on names: only
+When adding a subtask, remember two dispatcher behaviors keyed on names: only
 subtasks named `generate` get multi-GPU handling, and only scripts decorated
-with `@monitor_status` write `status.json` (which the launcher reads to detect
+with `@monitor_status` write `status.json` (which the dispatcher reads to detect
 failures).
 
 ## Update Configuration Defaults

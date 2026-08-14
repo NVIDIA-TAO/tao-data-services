@@ -6,6 +6,11 @@ container power users working from the TAO Data Services source tree.
 The root `README.md` is intentionally concise. Start here when you need the
 repository mental model, command flow, configuration flow, or validation map.
 
+This repository is the source of the TAO data-services container
+(`nvcr.io/nvidia/tao/tao-toolkit:<version>-dataservices`). For what the product
+is, how customers run it, and the terminology the rest of these documents use,
+read the opening sections of [Architecture](architecture.md).
+
 ## Start Paths
 
 | Role | Start with | Then read |

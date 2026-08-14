@@ -48,6 +48,38 @@ rg -n "TBD|PLACEHOLDER|example\\.com" README.md docs
 GPU, Docker build, private checkpoint, NGC, and full dataset tests are outside
 the normal blast radius for documentation-only changes.
 
+## Test Environment Setup
+
+The base development image has pytest and the runtime dependencies
+(`docker/requirements-pip.txt`), but **not** the TAO packages themselves. Set
+up once per container:
+
+```sh
+# On the host
+git submodule update --init          # tao-core/ and tao-pytorch/ are empty otherwise
+source scripts/envsetup.sh
+tao_ds --gpus all -- bash
+
+# Inside the container (repository is mounted at /workspace)
+pip install /workspace/tao-core/.    # provides nvidia_tao_core (status callbacks, api_utils)
+export PYTHONPATH=/workspace/tao-pytorch:$PYTHONPATH   # for tests that import nvidia_tao_pytorch
+pytest tests/test_config_modules.py -q                 # smoke check
+```
+
+Notes:
+
+* `nvidia_tao_core` is not in `docker/requirements-pip.txt` (only its
+  transitive dependencies are), so tests fail with import errors until you
+  install the submodule. This is the step the README historically missed.
+* `nvidia_tao_ds` itself is importable because the launcher sets
+  `PYTHONPATH=/workspace`; run `python setup.py develop` instead if you need
+  the console commands.
+* Tests that exercise Grounding DINO or TAO CLIP (`test_text2box.py`,
+  `tests/mining/test_image_embeddings.py`) import `nvidia_tao_pytorch` from
+  the submodule; the mining tests fall back to stubs when it is absent.
+* GPU- and data-heavy tests additionally need the private scratch datasets
+  mounted (paths under `/media/scratch_metropolis2/tao_ci/...`).
+
 ## Targeted Pytest Map
 
 | Change area | Suggested tests |
