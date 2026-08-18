@@ -9,6 +9,7 @@ import os
 import warnings
 
 from colorama import init
+from omegaconf import OmegaConf
 from termcolor import colored
 
 # Import Hydra exception classes for config error handling
@@ -92,6 +93,8 @@ def monitor_status(name='Data-services', mode='analyze'):
         def _func(cfg, **kwargs):
             # set up status logger
             os.makedirs(cfg.results_dir, exist_ok=True)
+
+            OmegaConf.save(cfg, os.path.join(cfg.results_dir, "experiment.yaml"))
 
             status_file = os.path.join(cfg.results_dir, "status.json")
             status_logging.set_status_logger(
