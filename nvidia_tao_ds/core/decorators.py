@@ -15,7 +15,7 @@ from termcolor import colored
 # Import Hydra exception classes for config error handling
 try:
     from hydra.errors import ConfigCompositionException, MissingConfigException
-    from omegaconf.errors import ConfigKeyError, MissingMandatoryValue, UnsupportedInterpolationType
+    from omegaconf.errors import ConfigKeyError, MissingMandatoryValue, UnsupportedInterpolationType  # pylint: disable=ungrouped-imports
 except ImportError:
     # Fallback for older versions or if imports fail
     ConfigCompositionException = Exception
