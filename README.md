@@ -48,7 +48,7 @@ agents, and container power users.
 | `runner/tao_ds.py` | Host-side Docker launcher used by the `tao_ds` shell function from `scripts/envsetup.sh`. |
 | `docker/` | Base development image Dockerfile, requirements, build script, and digest manifest. |
 | `release/` | Python package metadata plus release-container build scripts. |
-| `ci/` and `.gitlab-ci.yml` | Static-test helpers and merge-request pipeline wiring. |
+| `.github/workflows/` and `.pre-commit-config.yaml` | Pull-request checks: lint, license headers, DCO, README drift, and secret scan. |
 | `tests/` | Unit and integration-style tests for conversion, analytics, auto-label, mining, and config behavior. |
 | `tao-core/`, `tao-pytorch/` | In-repo submodules used by local development and container builds. |
 
@@ -115,11 +115,11 @@ subtasks are discovered from each command package's `scripts/` directory.
 
 ### Base Image Source
 
-`runner/tao_ds.py` and `ci/utils.py` resolve the immutable base image
+`runner/tao_ds.py` resolves the immutable base image
 (`nvstaging/tao/data_services_base_image`) from `docker/manifest.json`, choosing the architecture-specific
 digest for the host. The pinned digests are intentionally not duplicated here — they
-live in `docker/manifest.json` (and the CI / Jenkins / release files), and a static CI
-check (`ci/run_static_tests.py`) verifies those digest references stay in sync.
+live in `docker/manifest.json` and `release/docker/Dockerfile.release`; update both
+together when the base image is rebuilt.
 <!-- END GENERATED: supported-commands -->
 
 ## Container Builds
