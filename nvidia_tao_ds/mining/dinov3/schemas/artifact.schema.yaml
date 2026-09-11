@@ -1,0 +1,33 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://developer.nvidia.com/tao/data-refinement/artifact-1.0.schema.yaml
+title: TAO Data Refinement Artifact
+type: object
+required:
+  - artifact_id
+  - artifact_type
+  - schema_version
+  - producer
+  - inputs
+  - payload
+  - created_at
+properties:
+  artifact_id:
+    type: string
+    pattern: '^sha256:[0-9a-f]{64}$'
+  artifact_type:
+    type: string
+    minLength: 1
+  schema_version:
+    const: '1.0'
+  producer:
+    type: object
+  inputs:
+    type: array
+    items:
+      type: object
+  payload:
+    type: object
+  created_at:
+    type: string
+    format: date-time
+additionalProperties: false
