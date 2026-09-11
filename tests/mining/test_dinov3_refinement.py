@@ -16,6 +16,21 @@ import pytest
 import yaml
 
 from nvidia_tao_ds.mining.dinov3.materialize import materialize_manifest
+from nvidia_tao_ds.mining.dinov3.entrypoint.refinement import main as refinement_main
+from nvidia_tao_ds.mining.dinov3.dense_store import (
+    finalize_dense_store,
+    initialize_dense_store,
+    load_dense_store,
+    materialize_dense_shards,
+    verify_dense_store_integrity,
+)
+from nvidia_tao_ds.mining.dinov3.ann_index import load_ann_index
+from nvidia_tao_ds.mining.dinov3.ann_search import (
+    exact_rerank_ann_candidates,
+    retrieve_ann_candidates,
+)
+from nvidia_tao_ds.mining.dinov3 import dense_search
+from nvidia_tao_ds.mining.dinov3 import dense_store
 from nvidia_tao_ds.mining.dinov3 import contracts
 from nvidia_tao_ds.mining.dinov3.contracts import (
     ArtifactManifest,
@@ -102,7 +117,7 @@ def test_file_identity_rejects_mutation_during_hash(
         file_identity(payload)
 
 
-@pytest.mark.parametrize("backend", ["sharded"])
+@pytest.mark.parametrize("backend", ["sharded", "ann_rerank", "dense"])
 def test_search_metadata_cannot_replace_selection_fields(tmp_path, backend):
     """Source annotations must not overwrite computed identities or scores."""
     source_root = tmp_path / "source"
@@ -127,6 +142,32 @@ def test_search_metadata_cannot_replace_selection_fields(tmp_path, backend):
         )
         assert "source_row_id" not in result
         assert result.iloc[0]["search_proof"] == "exact_all_declared_shards"
+    else:
+        store_dir = tmp_path / "store"
+        register_embedding_store(
+            store_root=source_root, output_dir=store_dir, encoder={"name": "test"},
+        )
+        dense_dir = tmp_path / "dense"
+        initialize_dense_store(
+            source_store_manifest=store_dir / "embedding_store.json", output_dir=dense_dir,
+        )
+        plan = dense_dir / "dense_store_plan.json"
+        materialize_dense_shards(plan_path=plan, shard_indexes=[0])
+        finalize_dense_store(plan_path=plan)
+        search_options = dict(
+            query_path=queries, dense_store_manifest=dense_dir / "dense_store.json",
+            top_k=1, min_similarity=0.5, device="cpu",
+        )
+        if backend == "ann_rerank":
+            result = exact_rerank_ann_candidates(
+                **search_options, candidate_row_ids=np.array([[0]]),
+            )
+        else:
+            result = dense_search.exact_dense_search(
+                **search_options, checkpoint_path=tmp_path / "scan.npz",
+            )
+        assert result.iloc[0]["source_row_id"] == 0
+        assert result.iloc[0]["search_proof"] == "ann_exact_float32_rerank"
     row = result.iloc[0]
     assert row["sample_id"] == "source"
     assert row["query_id"] == "query"
@@ -174,6 +215,16 @@ def test_store_registration_rejects_overflowing_embedding_norms(tmp_path, bad_va
             store_root=source_root, output_dir=output_dir, encoder={"name": "test"},
         )
     assert not (output_dir / "_SUCCESS").exists()
+
+
+@pytest.mark.parametrize("fixed_size", [False, True])
+@pytest.mark.parametrize("bad_value", [1e30, -1e30])
+def test_dense_normalization_rejects_overflowing_embedding_norms(fixed_size, bad_value):
+    """Dense conversion must reject overflow even for previously registered stores."""
+    vector_type = pa.list_(pa.float32(), 2) if fixed_size else pa.list_(pa.float32())
+    values = pa.array([[bad_value, bad_value]], type=vector_type)
+    with np.errstate(over="ignore"), pytest.raises(ValueError, match="norms.*non-finite"):
+        dense_store._vectors_from_array(values, 2)
 
 
 @pytest.mark.parametrize("storage_type", ["unsupported", "tar", "zip"])
@@ -333,6 +384,83 @@ def test_multitask_empty_active_set_remains_a_clean_stop() -> None:
     selected = select_multitask_targets(frame, total=8, task_weights={"x": 2.0})
     assert selected.empty
     assert {"target_rank", "strategy"}.issubset(selected.columns)
+
+
+def test_selection_artifact_binds_scores_exclusions_and_parameters(
+    tmp_path: Path,
+) -> None:
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame(
+        {
+            "sample_id": ["keep", "drop"],
+            "task": ["x", "x"],
+            "weakness_score": [2.0, 1.0],
+        }
+    ).to_parquet(scores, index=False)
+    excluded = tmp_path / "excluded.json"
+    excluded.write_text(json.dumps({"sample_ids": ["drop"]}), encoding="utf-8")
+    output = tmp_path / "selected"
+    assert refinement_main(
+        [
+            "select-multitask",
+            "--scores",
+            str(scores),
+            "--exclude-targets",
+            str(excluded),
+            "--per-task",
+            "1",
+            "--score-column",
+            "weakness_score",
+            "--output-dir",
+            str(output),
+        ]
+    ) == 0
+    artifact = json.loads((output / "artifact.json").read_text(encoding="utf-8"))
+    assert [value["role"] for value in artifact["inputs"]] == [
+        "scores",
+        "excluded_targets",
+    ]
+    assert all(value["sha256"].startswith("sha256:") for value in artifact["inputs"])
+    assert artifact["payload"]["parameters"] == {
+        "per_task": 1,
+        "score_column": "weakness_score",
+    }
+
+
+def test_weighted_selection_artifact_records_fixed_budget(
+    tmp_path: Path,
+) -> None:
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame(
+        {
+            "sample_id": [
+                f"{task}-{index}" for task in ("x", "y") for index in range(6)
+            ],
+            "task": [task for task in ("x", "y") for _ in range(6)],
+            "weakness_score": list(range(6)) * 2,
+        }
+    ).to_parquet(scores, index=False)
+    output = tmp_path / "weighted"
+    assert refinement_main(
+        [
+            "select-multitask",
+            "--scores",
+            str(scores),
+            "--total",
+            "8",
+            "--task-weights-json",
+            '{"x": 3, "y": 1}',
+            "--output-dir",
+            str(output),
+        ]
+    ) == 0
+    artifact = json.loads((output / "artifact.json").read_text(encoding="utf-8"))
+    assert artifact["payload"]["parameters"] == {
+        "score_column": "weakness_score",
+        "selected_by_task": {"x": 6, "y": 2},
+        "task_weights": {"x": 3, "y": 1},
+        "total": 8,
+    }
 
 
 def test_exact_search_and_manifest_materialization(tmp_path: Path) -> None:
@@ -884,6 +1012,488 @@ def test_register_store_rejects_duplicate_identity(tmp_path: Path) -> None:
         )
 
 
+def test_dense_vector_store_is_resumable_and_preserves_global_rows(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    first = pd.DataFrame(
+        {
+            "sample_id": ["a", "b"],
+            "embedding": [[3.0, 4.0], [0.0, 2.0]],
+            "path": [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")],
+        }
+    )
+    second = pd.DataFrame(
+        {
+            "sample_id": ["c"],
+            "embedding": [[-5.0, 0.0]],
+            "path": [str(tmp_path / "c.jpg")],
+        }
+    )
+    first.to_parquet(source_root / "part-0.parquet", index=False)
+    second.to_parquet(source_root / "part-1.parquet", index=False)
+    registered = tmp_path / "registered"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=registered,
+        encoder={"name": "test"},
+        default_storage_type="file",
+    )
+
+    dense = tmp_path / "dense"
+    plan = initialize_dense_store(
+        source_store_manifest=registered / "embedding_store.json",
+        output_dir=dense,
+    )
+    assert plan["row_count"] == 3
+    assert plan["shards"][1]["row_start"] == 2
+    result = materialize_dense_shards(
+        plan_path=dense / "dense_store_plan.json", shard_indexes=[0, 1]
+    )
+    assert result["completed"] == [0, 1]
+    resumed = materialize_dense_shards(
+        plan_path=dense / "dense_store_plan.json", shard_indexes=[0, 1]
+    )
+    assert resumed["skipped"] == [0, 1]
+    artifact = finalize_dense_store(plan_path=dense / "dense_store_plan.json")
+    assert finalize_dense_store(
+        plan_path=dense / "dense_store_plan.json"
+    )["artifact_id"] == artifact["artifact_id"]
+    assert artifact["payload"]["row_count"] == 3
+    payload, loaded_artifact = load_dense_store(dense / "dense_store.json")
+    assert loaded_artifact["artifact_id"] == artifact["artifact_id"]
+    vectors = np.memmap(
+        dense / "vectors.f32", mode="r", dtype="<f4", shape=(3, 2)
+    )
+    np.testing.assert_allclose(
+        vectors,
+        np.asarray([[0.6, 0.8], [0.0, 1.0], [-1.0, 0.0]], dtype=np.float32),
+    )
+    assert payload["vector_inventory_digest"].startswith("sha256:")
+    assert payload["locator_defaults"] == {"storage_type": "file"}
+    integrity = verify_dense_store_integrity(dense / "dense_store.json")
+    assert integrity["verified_source_shards"] == 2
+
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame(
+        {"sample_id": ["query"], "embedding": [[1.0, 0.0]]}
+    ).to_parquet(queries, index=False)
+    neighbors = exact_rerank_ann_candidates(
+        query_path=queries,
+        dense_store_manifest=dense / "dense_store.json",
+        candidate_row_ids=np.asarray([[2, 0, 1]], dtype=np.int64),
+        top_k=1,
+        min_similarity=0.5,
+        duplicate_similarity=0.99,
+    )
+    assert neighbors.iloc[0]["sample_id"] == "a"
+    assert neighbors.iloc[0]["source_row_id"] == 0
+    assert neighbors.iloc[0]["source_part"].endswith("part-0.parquet")
+    assert neighbors.iloc[0]["storage_type"] == "file"
+    assert neighbors.iloc[0]["cosine_similarity"] == pytest.approx(0.6)
+    assert neighbors.attrs["adaptive_radius"]["underfill_exhaustion_proven"] is False
+
+    row_ids_only = exact_rerank_ann_candidates(
+        query_path=queries,
+        dense_store_manifest=dense / "dense_store.json",
+        candidate_row_ids=np.asarray([[2, 0, 1]], dtype=np.int64),
+        top_k=1,
+        min_similarity=0.5,
+        duplicate_similarity=0.99,
+        hydrate_locators=False,
+    )
+    assert row_ids_only.iloc[0]["sample_id"] == "0"
+    assert "source_part" not in row_ids_only.columns
+
+    index_dir = tmp_path / "ann_index"
+    index_dir.mkdir()
+    index_file = index_dir / "index.bin"
+    index_file.write_bytes(b"index")
+    index_payload = {
+        "index": file_identity(index_file),
+        "dense_store_artifact_id": loaded_artifact["artifact_id"],
+        "source_inventory_digest": payload["source_inventory_digest"],
+        "vector_inventory_digest": payload["vector_inventory_digest"],
+    }
+    (index_dir / "ann_index.json").write_text(
+        json.dumps(index_payload), encoding="utf-8"
+    )
+    index_artifact = ArtifactManifest(
+        artifact_type="ann_index",
+        producer={"action": "test", "version": "1.0"},
+        inputs=[],
+        payload=index_payload,
+    )
+    index_artifact.commit(index_dir)
+
+    audit_dir = tmp_path / "ann_audit"
+    audit_dir.mkdir()
+    audit_payload = {
+        "passed": True,
+        "index_artifact_id": index_artifact.artifact_id,
+        "n_probes": 4,
+        "ann_candidate_count": 3,
+        "dense_store_artifact_id": loaded_artifact["artifact_id"],
+        "source_inventory_digest": payload["source_inventory_digest"],
+        "vector_inventory_digest": payload["vector_inventory_digest"],
+    }
+    (audit_dir / "ann_audit.json").write_text(
+        json.dumps(audit_payload), encoding="utf-8"
+    )
+    audit_artifact = ArtifactManifest(
+        artifact_type="ann_recall_audit",
+        producer={"action": "test", "version": "1.0"},
+        inputs=[],
+        payload=audit_payload,
+    )
+    audit_artifact.commit(audit_dir)
+
+    candidates = tmp_path / "candidate_stage"
+    candidates.mkdir()
+    candidate_path = candidates / "ann_candidates.npz"
+    np.savez(candidate_path, candidate_ids=np.asarray([[2, 0, 1]], dtype=np.int64))
+    ArtifactManifest(
+        artifact_type="ann_candidates",
+        producer={"action": "test", "version": "1.0"},
+        inputs=[file_identity(queries, role="queries")],
+        payload={
+            "candidates": file_identity(candidate_path),
+            "index_artifact_id": index_artifact.artifact_id,
+            "dense_store_artifact_id": loaded_artifact["artifact_id"],
+            "source_inventory_digest": payload["source_inventory_digest"],
+            "audit_artifact_id": audit_artifact.artifact_id,
+            "n_probes": 4,
+            "ann_candidate_count": 3,
+        },
+    ).commit(candidates)
+    query_contract = tmp_path / "query_contract.json"
+    query_contract.write_text(
+        json.dumps({"encoder": {"name": "test"}, "embedding_dim": 2}),
+        encoding="utf-8",
+    )
+    reranked = tmp_path / "reranked"
+    rerank_args = [
+        "ann-rerank",
+        "--queries",
+        str(queries),
+        "--candidates",
+        str(candidate_path),
+        "--dense-store-manifest",
+        str(dense / "dense_store.json"),
+        "--ann-index-manifest",
+        str(index_dir / "ann_index.json"),
+        "--ann-audit-manifest",
+        str(audit_dir / "ann_audit.json"),
+        "--query-embedding-contract",
+        str(query_contract),
+        "--top-k",
+        "1",
+        "--min-similarity",
+        "0.5",
+        "--duplicate-similarity",
+        "0.99",
+        "--device",
+        "cpu",
+        "--output-dir",
+        str(reranked),
+    ]
+    invalid_exclusion = tmp_path / "invalid_exclusion.json"
+    invalid_exclusion.write_text(
+        json.dumps(
+            {
+                "source_row_ids": [3],
+                "dense_store_artifact_id": loaded_artifact["artifact_id"],
+                "source_inventory_digest": payload["source_inventory_digest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="out-of-range source_row_id"):
+        refinement_main(
+            [*rerank_args, "--exclude", str(invalid_exclusion)]
+        )
+    empty_exclusion = tmp_path / "empty_exclusion.parquet"
+    pd.DataFrame({"sample_id": pd.Series(dtype=str)}).to_parquet(
+        empty_exclusion, index=False
+    )
+    assert refinement_main(
+        [*rerank_args, "--exclude", str(empty_exclusion)]
+    ) == 0
+    staged = pd.read_parquet(reranked / "neighbors.parquet")
+    assert staged.iloc[0]["sample_id"] == "a"
+    assert staged.iloc[0]["search_proof"] == (
+        "ann_audited_exact_float32_rerank"
+    )
+    assert staged.iloc[0]["dense_store_artifact_id"] == (
+        loaded_artifact["artifact_id"]
+    )
+    summary = json.loads(
+        (reranked / "search_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["eligible_source_rows"] == 3
+    assert summary["n_probes"] == 4
+
+    dense_manifest_before = (dense / "dense_store.json").read_bytes()
+    plan_path = dense / "dense_store_plan.json"
+    tampered_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    tampered_plan["encoder"] = {"name": "wrong"}
+    plan_path.write_text(json.dumps(tampered_plan), encoding="utf-8")
+    with pytest.raises(ValueError, match="plan identity"):
+        finalize_dense_store(plan_path=plan_path)
+    assert (dense / "dense_store.json").read_bytes() == dense_manifest_before
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    vector_path = dense / "vectors.f32"
+    vector_bytes = bytearray(vector_path.read_bytes())
+    vector_bytes[0] ^= 1
+    vector_path.write_bytes(vector_bytes)
+    # Full checksum verification must catch corruption even when the storage
+    # backend coalesces timestamps. The cheap load gate checks metadata only.
+    with pytest.raises(RuntimeError, match="(identity|range) changed"):
+        verify_dense_store_integrity(dense / "dense_store.json")
+    vector_stat = vector_path.stat()
+    os.utime(vector_path, ns=(vector_stat.st_atime_ns, vector_stat.st_mtime_ns + 2_000_000_000))
+    with pytest.raises(RuntimeError, match="identity changed"):
+        load_dense_store(dense / "dense_store.json")
+
+
+def test_dense_exact_search_resumes_and_proves_underfill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    pd.DataFrame(
+        {
+            "sample_id": ["copy", "excluded", "winner", "far"],
+            "embedding": [
+                [1.0, 0.0],
+                [0.9, 0.4358899],
+                [0.8, 0.6],
+                [0.0, 1.0],
+            ],
+            "path": [
+                str(tmp_path / "copy.jpg"),
+                str(tmp_path / "excluded.jpg"),
+                str(tmp_path / "winner.jpg"),
+                str(tmp_path / "far.jpg"),
+            ],
+            "storage_type": ["file"] * 4,
+        }
+    ).to_parquet(source_root / "part.parquet", index=False)
+    registered = tmp_path / "registered"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=registered,
+        encoder={"name": "test"},
+    )
+    dense = tmp_path / "dense"
+    initialize_dense_store(
+        source_store_manifest=registered / "embedding_store.json",
+        output_dir=dense,
+    )
+    materialize_dense_shards(
+        plan_path=dense / "dense_store_plan.json", shard_indexes=[0]
+    )
+    finalize_dense_store(plan_path=dense / "dense_store_plan.json")
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame(
+        {"sample_id": ["query"], "embedding": [[1.0, 0.0]]}
+    ).to_parquet(queries, index=False)
+    progress = tmp_path / "progress.npz"
+
+    original_save = dense_search._save_progress
+    calls = 0
+
+    def interrupt_after_first_checkpoint(path: Path, **arrays: np.ndarray) -> None:
+        nonlocal calls
+        original_save(path, **arrays)
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated preemption")
+
+    monkeypatch.setattr(dense_search, "_save_progress", interrupt_after_first_checkpoint)
+    with pytest.raises(RuntimeError, match="simulated preemption"):
+        dense_search.exact_dense_candidates(
+            query_path=queries,
+            dense_store_manifest=dense / "dense_store.json",
+            candidate_limit=4,
+            hard_min_similarity=0.5,
+            excluded_row_ids={1},
+            checkpoint_path=progress,
+            chunk_rows=1,
+            checkpoint_chunks=1,
+            device="cpu",
+        )
+    monkeypatch.setattr(dense_search, "_save_progress", original_save)
+    result = dense_search.exact_dense_search(
+        query_path=queries,
+        dense_store_manifest=dense / "dense_store.json",
+        top_k=2,
+        min_similarity=0.5,
+        checkpoint_path=progress,
+        duplicate_similarity=0.99,
+        candidate_multiplier=2,
+        excluded_row_ids={1},
+        chunk_rows=1,
+        checkpoint_chunks=1,
+        device="cpu",
+    )
+    assert result["sample_id"].tolist() == ["winner"]
+    adaptive = result.attrs["adaptive_radius"]
+    assert adaptive["scan"]["resumed_from_row"] == 1
+    assert adaptive["query_stats"][0]["candidate_count_above_hard_floor"] == 2
+    assert adaptive["underfill_exhaustion_proven"] is True
+
+
+def test_dense_exact_search_cli_commits_lineage(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    pd.DataFrame(
+        {
+            "sample_id": ["near", "far"],
+            "embedding": [[1.0, 0.0], [0.0, 1.0]],
+            "path": [str(tmp_path / "near.jpg"), str(tmp_path / "far.jpg")],
+            "storage_type": ["file", "file"],
+        }
+    ).to_parquet(source_root / "part.parquet", index=False)
+    registered = tmp_path / "registered"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=registered,
+        encoder={"name": "test"},
+    )
+    dense = tmp_path / "dense"
+    initialize_dense_store(
+        source_store_manifest=registered / "embedding_store.json",
+        output_dir=dense,
+    )
+    materialize_dense_shards(
+        plan_path=dense / "dense_store_plan.json", shard_indexes=[0]
+    )
+    finalize_dense_store(plan_path=dense / "dense_store_plan.json")
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame(
+        {"sample_id": ["query"], "embedding": [[1.0, 0.0]]}
+    ).to_parquet(queries, index=False)
+    query_contract = tmp_path / "query_contract.json"
+    query_contract.write_text(
+        json.dumps({"encoder": {"name": "test"}, "embedding_dim": 2}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "search"
+    assert refinement_main(
+        [
+            "dense-exact-search",
+            "--queries",
+            str(queries),
+            "--source-store-manifest",
+            str(registered / "embedding_store.json"),
+            "--dense-store-manifest",
+            str(dense / "dense_store.json"),
+            "--query-embedding-contract",
+            str(query_contract),
+            "--top-k",
+            "1",
+            "--min-similarity",
+            "0.5",
+            "--duplicate-similarity",
+            "0.999",
+            "--device",
+            "cpu",
+            "--chunk-rows",
+            "1",
+            "--output-dir",
+            str(output),
+        ]
+    ) == 0
+    summary = json.loads((output / "search_summary.json").read_text())
+    assert summary["search_proof"] == "exact_all_dense_rows_float32"
+    assert summary["source_rows"] == 2
+    artifact = json.loads((output / "artifact.json").read_text())
+    source_input = next(
+        item
+        for item in artifact["inputs"]
+        if item.get("role") == "source_store_manifest"
+    )
+    registered_artifact = json.loads(
+        (registered / "artifact.json").read_text(encoding="utf-8")
+    )
+    assert source_input["artifact_id"] == registered_artifact["artifact_id"]
+    assert source_input["inventory_digest"]
+    assert (output / "_SUCCESS").is_file()
+
+
+def test_dense_exact_search_rejects_unrelated_source_store(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    unrelated_root = tmp_path / "unrelated"
+    source_root.mkdir()
+    unrelated_root.mkdir()
+    frame = pd.DataFrame(
+        {
+            "sample_id": ["near"],
+            "embedding": [[1.0, 0.0]],
+            "path": [str(tmp_path / "near.jpg")],
+            "storage_type": ["file"],
+        }
+    )
+    frame.to_parquet(source_root / "part.parquet", index=False)
+    frame.to_parquet(unrelated_root / "part.parquet", index=False)
+    registered = tmp_path / "registered"
+    unrelated = tmp_path / "unrelated_registered"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=registered,
+        encoder={"name": "test"},
+    )
+    register_embedding_store(
+        store_root=unrelated_root,
+        output_dir=unrelated,
+        encoder={"name": "test"},
+    )
+    dense = tmp_path / "dense"
+    initialize_dense_store(
+        source_store_manifest=registered / "embedding_store.json",
+        output_dir=dense,
+    )
+    materialize_dense_shards(
+        plan_path=dense / "dense_store_plan.json", shard_indexes=[0]
+    )
+    finalize_dense_store(plan_path=dense / "dense_store_plan.json")
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame(
+        {"sample_id": ["query"], "embedding": [[1.0, 0.0]]}
+    ).to_parquet(queries, index=False)
+    query_contract = tmp_path / "query_contract.json"
+    query_contract.write_text(
+        json.dumps({"encoder": {"name": "test"}, "embedding_dim": 2}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="another source-store artifact"):
+        refinement_main(
+            [
+                "dense-exact-search",
+                "--queries",
+                str(queries),
+                "--source-store-manifest",
+                str(unrelated / "embedding_store.json"),
+                "--dense-store-manifest",
+                str(dense / "dense_store.json"),
+                "--query-embedding-contract",
+                str(query_contract),
+                "--top-k",
+                "1",
+                "--min-similarity",
+                "0.5",
+                "--device",
+                "cpu",
+                "--output-dir",
+                str(tmp_path / "search"),
+            ]
+        )
+
+
 def test_artifact_commit_recovers_missing_success_marker(tmp_path: Path) -> None:
     artifact = ArtifactManifest(
         artifact_type="test",
@@ -902,3 +1512,162 @@ def test_artifact_commit_recovers_missing_success_marker(tmp_path: Path) -> None
     )
 
 
+def test_ann_index_loader_rejects_same_size_content_mutation(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index.cuvs"
+    index_path.write_bytes(b"original-index")
+    payload = {
+        "backend": "test",
+        "index": file_identity(index_path),
+    }
+    (tmp_path / "ann_index.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    ArtifactManifest(
+        artifact_type="ann_index",
+        producer={"action": "test", "version": "1.0"},
+        inputs=[],
+        payload=payload,
+    ).commit(tmp_path)
+
+    index_path.write_bytes(b"mutated-index!")
+    assert index_path.stat().st_size == payload["index"]["bytes"]
+    with pytest.raises(RuntimeError, match="content changed"):
+        load_ann_index(tmp_path / "ann_index.json")
+
+
+def test_ann_retrieval_rejects_unsupported_multi_gpu_candidate_depth(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="at most 1024"):
+        retrieve_ann_candidates(
+            query_path=tmp_path / "queries.parquet",
+            ann_index_manifest=tmp_path / "ann_index.json",
+            n_probes=32,
+            ann_candidate_count=1025,
+        )
+
+
+def test_exact_cli_binds_registered_store_and_refuses_committed_overwrite(
+    tmp_path: Path,
+) -> None:
+    source = pd.DataFrame(
+        {
+            "sample_id": ["near", "far"],
+            "embedding": [[0.9, 0.1], [0.0, 1.0]],
+            "path": ["/near.jpg", "/far.jpg"],
+        }
+    )
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_path = source_root / "part.parquet"
+    source.to_parquet(source_path, index=False)
+    store_dir = tmp_path / "registered"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=store_dir,
+        encoder={"name": "c-radio"},
+        default_storage_type="file",
+    )
+    queries = pd.DataFrame({"sample_id": ["q"], "embedding": [[1.0, 0.0]]})
+    query_path = tmp_path / "queries.parquet"
+    queries.to_parquet(query_path, index=False)
+    query_contract = tmp_path / "query_contract.json"
+    query_contract.write_text(
+        json.dumps(
+            {
+                "encoder": {"name": "c-radio"},
+                "embedding_dim": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "search"
+    args = [
+        "exact-search",
+        "--queries",
+        str(query_path),
+        "--source-part",
+        str(source_path),
+        "--source-store-manifest",
+        str(store_dir / "embedding_store.json"),
+        "--query-embedding-contract",
+        str(query_contract),
+        "--top-k",
+        "1",
+        "--min-similarity",
+        "0.8",
+        "--output-dir",
+        str(output),
+    ]
+    assert refinement_main(args) == 0
+    artifact = json.loads((output / "artifact.json").read_text(encoding="utf-8"))
+    assert artifact["payload"]["neighbors"]["sha256"].startswith("sha256:")
+    assert artifact["inputs"][1]["artifact_id"]
+    with pytest.raises(RuntimeError, match="committed output"):
+        refinement_main(args)
+
+
+def test_exact_cli_rejects_unhashed_or_uncommitted_store(tmp_path: Path) -> None:
+    source = pd.DataFrame(
+        {
+            "sample_id": ["near"],
+            "embedding": [[1.0, 0.0]],
+            "path": ["/near.jpg"],
+        }
+    )
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_path = source_root / "part.parquet"
+    source.to_parquet(source_path, index=False)
+    query_path = tmp_path / "queries.parquet"
+    pd.DataFrame(
+        {"sample_id": ["query"], "embedding": [[1.0, 0.0]]}
+    ).to_parquet(query_path, index=False)
+    query_contract = tmp_path / "query_contract.json"
+    query_contract.write_text(
+        json.dumps({"encoder": {"name": "test"}, "embedding_dim": 2}),
+        encoding="utf-8",
+    )
+
+    def arguments(store_dir: Path, output: str) -> list[str]:
+        return [
+            "exact-search",
+            "--queries",
+            str(query_path),
+            "--source-part",
+            str(source_path),
+            "--source-store-manifest",
+            str(store_dir / "embedding_store.json"),
+            "--query-embedding-contract",
+            str(query_contract),
+            "--top-k",
+            "1",
+            "--min-similarity",
+            "0.8",
+            "--output-dir",
+            str(tmp_path / output),
+        ]
+
+    unhashed = tmp_path / "unhashed"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=unhashed,
+        encoder={"name": "test"},
+        hash_content=False,
+        default_storage_type="file",
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        refinement_main(arguments(unhashed, "unhashed-search"))
+
+    committed = tmp_path / "committed"
+    register_embedding_store(
+        store_root=source_root,
+        output_dir=committed,
+        encoder={"name": "test"},
+        default_storage_type="file",
+    )
+    (committed / "_SUCCESS").unlink()
+    with pytest.raises(ValueError, match="committed embedding-store"):
+        refinement_main(arguments(committed, "uncommitted-search"))
