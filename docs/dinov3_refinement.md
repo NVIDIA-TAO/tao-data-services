@@ -1,0 +1,109 @@
+# DINOv3 SSL Data Refinement
+
+The `nvidia_tao_ds.mining.dinov3` package provides DINOv3-only data
+operations for the DINOv3 SSL DEFT workflow. This is not a generic mining API;
+other model families are not supported by this package. DINOv3 scoring and training remain in
+TAO PyTorch; the DS-owned `nvidia_tao_ds.mining.dinov3.workflow` package owns
+workflow state, execution, recovery and packaged recipes.
+
+## Run DEFT in one allocated DS container
+
+The DS image already includes TAO PyTorch/Core, Torch and the data-stack
+dependencies. No host TAO install, Skill Bank runtime, nested Docker, new
+Dockerfile or startup pip install is required. The image release must include
+the DEFT modules from the companion DS/PyTorch/Core changes.
+
+```bash
+python -m nvidia_tao_ds.mining.dinov3.workflow preflight --gpu
+python -m nvidia_tao_ds.mining.dinov3.workflow init --recipe grit-score --output run.yaml
+# Set real paths and resource requests within the allocated container.
+python -m nvidia_tao_ds.mining.dinov3.workflow validate run.yaml
+python -m nvidia_tao_ds.mining.dinov3.workflow plan run.yaml
+python -m nvidia_tao_ds.mining.dinov3.workflow run run.yaml
+```
+
+For one allocation use `execution.backend: local` without `container_images`:
+the durable process runner executes mining, scoring and training in the same
+runtime. External four-verb runners remain supported for multi-node or separate
+image jobs; this controller does not replace the TAO platform launcher.
+Preflight checks imports and optional mixed-precision CUDA convolution forward/
+backward execution, not GPU FAISS or dataset
+quality. Review the scoring backend explicitly. The approved rc-36 image lacks
+the new DEFT modules, so installed-package readiness requires a normal release.
+Its stock CUDA convolution runtime also fails on the tested A6000/580.173.02
+host. Use the existing external runner with the validated PyTorch image for
+scoring/training until the DS runtime passes compute preflight; do not install
+packages at startup or silently alter precision to hide this incompatibility.
+
+## Register an embedding store
+
+```bash
+python -m nvidia_tao_ds.mining.dinov3.entrypoint.refinement register-store \
+  --store-root /data/cradiov4/parquet \
+  --output-dir /data/cradiov4/registered \
+  --encoder-name c-radiov4 \
+  --encoder-checkpoint-digest sha256:... \
+  --input-resolution 512 \
+  --normalization imagenet \
+  --source-payload-contract /data/source_payload_contract.json
+```
+
+The action inventories existing Parquet shards without copying them. Its
+`embedding_store.json`, `artifact.json`, and `_SUCCESS` files form the stable
+input used by later runs. Every shard is content-hashed. The source-payload
+contract names immutable dataset IDs, versions, and local roots; registration
+rejects locators outside those roots and records a deterministic locator audit.
+For example:
+
+```json
+{
+  "schema_version": "1.0",
+  "immutability": "immutable",
+  "datasets": [
+    {
+      "dataset_id": "wfm-aoi",
+      "version": "dss-snapshot-12345",
+      "root_uri": "file:///data/wfm-aoi-v12345"
+    }
+  ]
+}
+```
+
+Omitting `--source-payload-contract` remains available for standalone legacy
+uses, but the DINOv3 SSL DEFT workflow requires this provenance binding.
+
+## Select, search, and publish
+
+`select-grit` consumes a model-produced `grit_score`; Data Services does not
+implement the formula. `select-multitask` normalizes weakness within task,
+allocates equal per-task budgets, and deduplicates samples across tasks.
+
+`exact-search` scans every declared embedding shard and applies cumulative
+exclusions plus two independent C-RADIO thresholds. `min_similarity` is the
+initial weak-query relevance radius; `duplicate_similarity` rejects near-exact
+copies of the query or any already accepted image. The action retrieves
+`candidate_multiplier * top_k` candidates, allocates them round-robin across
+queries, and lowers relevance by `similarity_step` only until
+`hard_min_similarity`. It accepts an underfilled result rather than cross that
+floor. `search_summary.json` records every attempted radius and rejection count.
+
+This is the correctness reference for small pools and search validation.
+For full-corpus deployments, `dense-init`, an array of `dense-write`, and
+`dense-finalize` materialize one immutable float32 random-access vector store.
+`build-ann-index` creates a persistent sharded multi-GPU cuVS IVF-PQ index.
+Index construction is a one-time corpus operation; it is not repeated per
+refinement round.
+
+Production indexed search has two resumable actions. `ann-candidates` loads the
+index and accepts only the probe count and candidate depth approved by its
+committed exact-recall audit. `ann-rerank` consumes that committed candidate
+artifact, reads the corresponding float32 vectors, computes exact cosine
+scores, and applies the same radius, exclusion, and duplicate rules as exact
+search. The runtimes are deliberately separable so cuVS and model-side PyTorch
+CUDA dependencies do not need to coexist. ANN underfill is
+`search_budget_exhausted`; use `exact-search` when a terminal
+`radius_exhausted` proof is required.
+
+`materialize` appends novel neighbors to an immutable cumulative Parquet
+training manifest. Images remain at their original `path` or archive
+`storage_type`/`path`/`member`; no symlinks or extracted copies are created.
