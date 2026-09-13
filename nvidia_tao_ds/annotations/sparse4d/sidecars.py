@@ -162,9 +162,11 @@ def write_ltt_2dgt_sidecar(
     keys. The normalized aliases ``class_name``, ``instance_id``, ``box2`` and
     ``box3`` are also accepted.
 
-    A missing visible box preserves TAO's legacy semantics: the full box is
-    copied to ``box3`` and its visibility/occlusion weight is zero. Source
-    classes can only be dropped by mapping them explicitly to ``None``.
+    A missing or invalid visible box preserves TAO's legacy semantics: the
+    full box is copied to ``box3`` and its visibility/occlusion weight is zero.
+    Invalid full boxes are skipped per camera because clipped projections can
+    legitimately have zero area. Source classes can only be dropped by mapping
+    them explicitly to ``None``.
     """
     classes = validate_class_names(class_names)
     cameras = validate_class_names(camera_names)
@@ -172,6 +174,8 @@ def write_ltt_2dgt_sidecar(
     camera_to_id = {name: index for index, name in enumerate(cameras)}
     resolved_class_map = _validate_class_name_map(class_name_map, classes)
     rows = []
+    skipped_invalid_full_boxes = 0
+    visible_box_fallbacks = 0
     normalized_frames = _annotation_frames(frames)
 
     for current_frame_id, frame_annotations in normalized_frames:
@@ -202,18 +206,30 @@ def write_ltt_2dgt_sidecar(
                     raise ValueError(
                         f"Annotation camera {camera_name!r} is not in camera_names"
                     )
-                full_box = _xyxy(full_value, "2D full box")
+                try:
+                    full_box = _xyxy(full_value, "2D full box")
+                except ValueError:
+                    skipped_invalid_full_boxes += 1
+                    continue
                 if visible_boxes is not None and camera_name in visible_boxes:
-                    visible_box = _xyxy(
-                        visible_boxes[camera_name], "2D visible box"
-                    )
-                    full_area = (full_box[2] - full_box[0]) * (
-                        full_box[3] - full_box[1]
-                    )
-                    visible_area = (visible_box[2] - visible_box[0]) * (
-                        visible_box[3] - visible_box[1]
-                    )
-                    weight = float(np.clip(visible_area / full_area, 0.0, 1.0))
+                    try:
+                        visible_box = _xyxy(
+                            visible_boxes[camera_name], "2D visible box"
+                        )
+                    except ValueError:
+                        visible_box = full_box
+                        weight = 0.0
+                        visible_box_fallbacks += 1
+                    else:
+                        full_area = (full_box[2] - full_box[0]) * (
+                            full_box[3] - full_box[1]
+                        )
+                        visible_area = (visible_box[2] - visible_box[0]) * (
+                            visible_box[3] - visible_box[1]
+                        )
+                        weight = float(
+                            np.clip(visible_area / full_area, 0.0, 1.0)
+                        )
                 else:
                     visible_box = full_box
                     weight = 0.0
@@ -236,6 +252,8 @@ def write_ltt_2dgt_sidecar(
     )
     document = dict(metadata or {})
     document.setdefault("num_frames", len(normalized_frames))
+    document["num_skipped_invalid_full_boxes"] = skipped_invalid_full_boxes
+    document["num_visible_box_fallbacks"] = visible_box_fallbacks
     return write_ltt_2dgt(
         path,
         scene=scene,

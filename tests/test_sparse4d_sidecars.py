@@ -99,6 +99,58 @@ def test_ltt_sidecar_accepts_a_generator_and_empty_annotations(tmp_path):
     assert artifact["instance_id"].dtype == np.int64
 
 
+def test_ltt_sidecar_skips_invalid_full_boxes_and_falls_back_visible_boxes(
+    tmp_path,
+):
+    """Clipped source boxes do not abort production sidecar generation."""
+    frames = {
+        3: [
+            {
+                "object type": "person",
+                "object id": 1,
+                "2d bounding box": {
+                    "CameraA": [0, 0, 10, 20],
+                    "CameraB": [2, 4, 8, 4],
+                },
+                "2d bounding box visible": {
+                    "CameraA": [0, 0, 5, 0],
+                },
+            },
+            {
+                "object type": "forklift",
+                "object id": 2,
+                "2d bounding box": {"CameraA": [0, 0, np.nan, 20]},
+            },
+            {
+                "object type": "forklift",
+                "object id": 3,
+                "2d bounding box": {"CameraB": [1, 2, 11, 22]},
+                "2d bounding box visible": {
+                    "CameraB": [1, 2, 11, np.inf],
+                },
+            },
+        ]
+    }
+
+    output = write_ltt_2dgt_sidecar(
+        tmp_path / "robust.npz",
+        scene="robust",
+        class_names=CLASSES,
+        camera_names=CAMERAS,
+        frames=frames,
+    )
+    artifact = load_contract(output, LTT_2DGT_SCHEMA_VERSION)
+
+    assert artifact["instance_id"].tolist() == [1, 3]
+    np.testing.assert_allclose(
+        artifact["box2"], [[0, 0, 10, 20], [1, 2, 11, 22]]
+    )
+    np.testing.assert_allclose(artifact["box3"], artifact["box2"])
+    np.testing.assert_allclose(artifact["occ"], [0.0, 0.0])
+    assert artifact["metadata"]["num_skipped_invalid_full_boxes"] == 2
+    assert artifact["metadata"]["num_visible_box_fallbacks"] == 2
+
+
 def test_ltt_scene_adapter_reads_raw_json_without_external_data(tmp_path):
     """The file adapter derives cameras and writes the consumer filename."""
     scene = tmp_path / "SceneA"
