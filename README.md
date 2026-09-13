@@ -105,7 +105,7 @@ subtasks are discovered from each command package's `scripts/` directory.
 | Command | Python entry point | Script subtasks |
 | :--- | :--- | :--- |
 | `analytics` | `nvidia_tao_ds.data_analytics.entrypoint.analytics:main` | `analyze`<br>`kpi_analyze`<br>`validate` |
-| `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice` |
+| `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice`<br>`sparse4d_prepare` |
 | `augmentation` | `nvidia_tao_ds.augmentation.entrypoint.augment:main` | `generate` |
 | `auto_label` | `nvidia_tao_ds.auto_label.entrypoint.auto_label:main` | `generate` |
 | `embedding` | `nvidia_tao_ds.mining.embedding.entrypoint.embedding:main` | `image_embeddings`<br>`text_embeddings` |
@@ -121,6 +121,36 @@ digest for the host. The pinned digests are intentionally not duplicated here â€
 live in `docker/manifest.json` (and the CI / Jenkins / release files), and a static CI
 check (`ci/run_static_tests.py`) verifies those digest references stay in sync.
 <!-- END GENERATED: supported-commands -->
+
+## Sparse4D Data Preparation
+
+`annotations sparse4d_prepare` creates the versioned artifacts consumed by
+TAO Sparse4D. Start from the packaged example spec and select one operation:
+
+```sh
+annotations sparse4d_prepare \
+  -e nvidia_tao_ds/annotations/experiment_specs/sparse4d_prepare.yaml \
+  operation=lazy_index \
+  lazy_index.annotation_source=/data/annotations/train.txt \
+  results_dir=/results/sparse4d_prepare
+```
+
+The supported operations are:
+
+- `lazy_index`: build the trusted-pickle frame index and camera-count cache.
+- `ltt_2dgt`: create per-scene `ltt_2dgt/v1` visible-box sidecars.
+- `ltt_data`: extract a grouped `ltt_data/v2` Loose-to-Tight training cache.
+- `rtdetr_2d`: normalize archived KITTI RT-DETR labels to
+  `ltt_rtdetr2d/v1`.
+- `sv2d`: create calibration-free Sparse4D PKLs and paired 2D caches from a
+  COCO manifest.
+
+Keep `class_names` identical, including order, to the TAO
+`dataset.classes` setting. For `sv2d`, enable
+`dataset.resize_to_canonical_2d` in TAO and use the same canonical height and
+width; the runtime rejects mismatched cache/image dimensions. Generated PKLs
+and lazy indexes contain resolved paths, so retain the same dataset mount paths
+between preparation and training or rebuild them after relocation.
 
 ## Container Builds
 
