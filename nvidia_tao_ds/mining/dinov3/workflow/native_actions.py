@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 import pyarrow.parquet as pq
 
 from ..contracts import canonical_digest, file_sha256, write_json_atomic
@@ -30,6 +30,32 @@ def _configured_absolute(path: str | Path) -> Path:
     return value if value.is_absolute() else (Path.cwd() / value).absolute()
 
 
+def _allow_deft_keys(node) -> None:
+    """Recursively clear OmegaConf struct mode so DEFT keys can be composed.
+
+    DEFT writes orchestration-only keys -- ``grit_score.*`` and
+    ``dataset.train_manifest`` -- that the TAO DINOv3 structured schema does
+    not declare. For structured configs OmegaConf evaluates struct mode per
+    node rather than inheriting it from the root, so every nested node has to
+    be relaxed explicitly. Declared fields keep their defaults *and* their type
+    validation; only the addition of new keys is permitted.
+    """
+    if not isinstance(node, DictConfig):
+        return
+    OmegaConf.set_struct(node, False)
+    for key in list(node.keys()):
+        # Never resolve here: the composed spec legitimately contains mandatory
+        # (``???``) values and interpolations that are only filled in later.
+        child = OmegaConf.select(
+            node,
+            str(key),
+            throw_on_missing=False,
+            throw_on_resolution_failure=False,
+        )
+        if isinstance(child, DictConfig):
+            _allow_deft_keys(child)
+
+
 def _experiment_spec(base_spec: str | Path):
     """Compose a user spec over the installed TAO DINOv3 structured defaults."""
     try:
@@ -40,9 +66,13 @@ def _experiment_spec(base_spec: str | Path):
             "The Data Services container must include the TAO DINOv3 runtime"
         ) from error
     base_path = Path(base_spec).expanduser().resolve()
-    return base_path, OmegaConf.merge(
-        OmegaConf.structured(ExperimentConfig()), OmegaConf.load(base_path)
-    )
+    schema = OmegaConf.structured(ExperimentConfig())
+    # Relax before the merge as well, so a base spec that already carries a
+    # ``grit_score`` section composes instead of raising on an unknown key.
+    _allow_deft_keys(schema)
+    merged = OmegaConf.merge(schema, OmegaConf.load(base_path))
+    _allow_deft_keys(merged)
+    return base_path, merged
 
 
 def _write_yaml_atomic(path: Path, config) -> Path:
@@ -103,6 +133,18 @@ def build_grit_spec(
     """Write a complete native ``dinov3 grit_score`` experiment spec."""
     base_path, spec = _experiment_spec(base_spec)
     output = Path(output_dir).resolve()
+    # Capture the settings the schema (or the base spec) declares *before* the
+    # orchestration keys below are written, so the validation further down only
+    # ever rejects genuinely unknown names.
+    declared = OmegaConf.select(spec, "grit_score", throw_on_missing=False)
+    if declared is None:
+        # The installed TAO DINOv3 schema does not declare the DEFT
+        # ``grit_score`` node, so compose it here. Without a schema there is
+        # nothing to validate the caller's settings against.
+        spec.grit_score = OmegaConf.create({})
+        valid = None
+    else:
+        valid = set(declared.keys())
     spec.results_dir = str(output)
     spec.grit_score.results_dir = str(output)
     spec.grit_score.input_parquet = str(Path(input_parquet).resolve())
@@ -111,10 +153,10 @@ def build_grit_spec(
         raise FileNotFoundError(f"DINOv3 checkpoint does not exist: {checkpoint_path}")
     spec.grit_score.checkpoint = str(checkpoint_path)
     spec.grit_score.base_spec = str(base_path)
-    valid = set(spec.grit_score.keys())
-    unknown = set(settings).difference(valid)
-    if unknown:
-        raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
+    if valid is not None:
+        unknown = set(settings).difference(valid)
+        if unknown:
+            raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
     for name, value in settings.items():
         spec.grit_score[name] = value
     destination = output / "grit_score.yaml"
