@@ -1780,7 +1780,9 @@ def test_data_lock_accepts_actions_without_parameter_blocks(tmp_path: Path) -> N
 def test_native_lock_covers_dinov3_and_inherited_nvdinov2_runtime(
     tmp_path: Path,
 ) -> None:
-    pytorch = DATA_SERVICES.parent / "tao-pytorch"
+    # ``tao-pytorch`` is a submodule of this repository (see .gitmodules:
+    # ``path = tao-pytorch``), so it lives inside DATA_SERVICES, not beside it.
+    pytorch = DATA_SERVICES / "tao-pytorch"
     assert pytorch.is_dir()
     value = _config(tmp_path, "grit_score").to_dict()
     value["execution"]["environment"]["PYTHONPATH"] = os.pathsep.join(
