@@ -1784,6 +1784,28 @@ def test_native_lock_covers_dinov3_and_inherited_nvdinov2_runtime(
     # ``path = tao-pytorch``), so it lives inside DATA_SERVICES, not beside it.
     pytorch = DATA_SERVICES / "tao-pytorch"
     assert pytorch.is_dir()
+    # This test asserts the data lock fingerprints the *installed* native DINOv3
+    # runtime, so it can only run where that runtime is actually checked out.
+    # The native GRIT scoring entrypoint and its implementation closure are not
+    # part of the pinned ``tao-pytorch`` submodule yet, so skip rather than fail
+    # on an upstream artifact this repository does not control. The guard is
+    # deliberately narrow: it re-enables itself the moment the submodule ships
+    # the closure that ``controller._data_lock`` requires for ``grit_score``.
+    missing = [
+        part
+        for part in (
+            "nvidia_tao_pytorch/ssl/dinov3/scripts/grit_score.py",
+            "nvidia_tao_pytorch/ssl/dinov3/data_refinement",
+            "nvidia_tao_pytorch/ssl/dinov3/dataloader/local_image.py",
+            "nvidia_tao_pytorch/config/dinov3/grit_score.py",
+        )
+        if not (pytorch / part).exists()
+    ]
+    if missing:
+        pytest.skip(
+            "native DINOv3 GRIT runtime is not in the pinned tao-pytorch "
+            f"submodule: {missing}"
+        )
     value = _config(tmp_path, "grit_score").to_dict()
     value["execution"]["environment"]["PYTHONPATH"] = os.pathsep.join(
         [str(DATA_SERVICES), str(pytorch)]
