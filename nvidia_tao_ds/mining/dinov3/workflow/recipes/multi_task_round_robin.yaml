@@ -1,0 +1,96 @@
+schema_version: "1.0"
+
+workflow:
+  strategy: multi_task_round_robin
+  initialization: base_checkpoint
+  max_rounds: 10
+  persistent_target_rounds: 3
+  # Optional when evaluation is configured. The controller stops after this
+  # many rounds without a meaningful weighted KPI improvement and delivers
+  # the best evaluated checkpoint, not necessarily the last checkpoint.
+  # early_stopping:
+  #   patience: 2
+  #   min_delta: 0.002
+  #   metrics:
+  #     - {task: classification, name: macro_f1, weight: 1.0}
+  #     - {task: segmentation, name: mean_iou, weight: 1.0}
+
+model:
+  base_checkpoint: /path/to/base_dinov3_checkpoint.pth
+
+data:
+  # The score action writes task_scores.parquet with sample_id, task,
+  # weakness_score, and the target's fixed C-RADIO embedding.
+  target_manifest: /path/to/adaptive_target_manifest.parquet
+  previous_training_manifest: /path/to/parent_training_manifest.parquet
+  benchmark_manifest: /path/to/sealed_benchmark_manifest.json
+  benchmark_acquisition_units: /path/to/sealed_benchmark_units.parquet
+  acquisition_unit_column: acquisition_unit_id
+  # Binds every file/archive locator to an immutable, versioned dataset root.
+  source_payload_contract: /path/to/source_payload_contract.json
+  source_store_manifest: /path/to/cradiov4_embedding_store/embedding_store.json
+  target_embedding_contract: /path/to/target_embedding_contract.json
+
+multi_task:
+  policy: balanced
+  tasks: [classification, retrieval, segmentation]
+  # Fixed total cost per round. Weights divide this budget without increasing it.
+  targets_per_round: 2400
+  task_weights: {classification: 1.0, retrieval: 1.0, segmentation: 1.0}
+
+mining:
+  top_k_per_target: 32
+  min_similarity: 0.80
+  hard_min_similarity: 0.74
+  similarity_step: 0.02
+  duplicate_similarity: 0.995
+  candidate_multiplier: 10
+  parent_history_policy: exclude
+
+training:
+  base_spec: /path/to/dinov3_train_spec.yaml
+  passes_per_round: 12
+  lr_scaling_rule: preserve_base_spec
+  # Accumulate mined data, not model updates. Every candidate starts from this
+  # run's immutable model.base_checkpoint.
+  checkpoint_policy: base_checkpoint_each_round
+  # Optional: graduate only when the cumulative manifest can keep more nodes
+  # above the requested optimizer-update floor. Enabling more than one node
+  # requires the gang-capable external execution contract documented below.
+  # node_scaling:
+  #   mode: target_optimizer_updates
+  #   allowed_nodes: [1, 2, 4, 8]
+  #   gpus_per_node: 8
+  #   target_optimizer_updates: 2304
+
+actions:
+  score:
+    # Replace this adapter with the customer's heads and per-sample task losses.
+    command: [/path/to/customer_score_adapter, --targets, "{target_manifest}", --checkpoint, "{checkpoint}", --head-config, "{head_config}", --output-dir, "{output_dir}"]
+    # List the adapter's complete implementation closure for immutable approval.
+    implementation_files: [/path/to/customer_score_adapter]
+    parameters: {head_config: /path/to/customer_heads.yaml}
+    execution_mode: runner
+    resources: {gpus: 1}
+  data:
+    command: [python, -m, nvidia_tao_ds.mining.dinov3.entrypoint.refinement]
+  search:
+    command: []
+  train:
+    command: [dinov3, train, -e, "{training_spec}"]
+    execution_mode: runner
+    resources: {nodes: 1, gpus_per_node: 1}
+  evaluate:
+    # Optional customer evaluator. It must emit metrics.json,
+    # evaluation_commit.json, and _SUCCESS.
+    command: []
+    metrics: "{output_dir}/metrics.json"
+
+execution:
+  # Run within one already-allocated TAO DS container; no nested container.
+  # Use backend: external for distributed or separate-image platform jobs.
+  backend: local
+  poll_seconds: 10
+
+output:
+  run_dir: /path/to/runs/dinov3_multitask
