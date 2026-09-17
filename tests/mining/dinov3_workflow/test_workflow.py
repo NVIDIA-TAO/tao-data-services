@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 
+from omegaconf import OmegaConf
 import pandas as pd
 import pytest
 import torch
@@ -45,6 +47,53 @@ from nvidia_tao_ds.mining.dinov3.workflow.execution import (  # noqa: E402
 )
 from nvidia_tao_ds.mining.dinov3.workflow.native_actions import (  # noqa: E402
     resolved_training_batch_size,
+)
+
+
+def _native_deft_runtime_gap() -> str | None:  # noqa: E302
+    """Report why the installed TAO DINOv3 runtime cannot serve native DEFT.
+
+    The native DEFT actions compose their experiment specs against the
+    *installed* ``nvidia_tao_pytorch`` structured config and resolve the native
+    ``grit_score`` entrypoint from disk. DINOv3 runtimes that predate DEFT ship
+    neither the ``grit_score`` config node, nor ``dataset.train_manifest``, nor
+    the ``grit_score`` script module, so the native-path tests below cannot run
+    against them. Returns ``None`` when the runtime is DEFT-capable.
+    """
+    try:
+        from nvidia_tao_pytorch.config.dinov3.default_config import (  # pylint: disable=import-outside-toplevel
+            ExperimentConfig,
+        )
+    except Exception as error:  # pragma: no cover - depends on the installed image
+        return f"the installed TAO DINOv3 runtime is unavailable ({error})"
+    missing: list[str] = []
+    try:
+        spec = OmegaConf.structured(ExperimentConfig())
+        if "grit_score" not in spec:
+            missing.append("ExperimentConfig.grit_score")
+        dataset = spec.get("dataset") if "dataset" in spec else None
+        if dataset is None or "train_manifest" not in dataset:
+            missing.append("DINOv3DatasetConfig.dataset.train_manifest")
+    except Exception as error:  # pragma: no cover - depends on the installed image
+        return f"the installed TAO DINOv3 config is unusable ({error})"
+    module_name = "nvidia_tao_pytorch.ssl.dinov3.scripts.grit_score"
+    try:
+        resolved = importlib.util.find_spec(module_name) is not None
+    except (ImportError, AttributeError, ValueError):
+        resolved = False
+    if not resolved:
+        missing.append(module_name)
+    if missing:
+        return "the installed TAO DINOv3 runtime predates DEFT support " \
+               f"(missing: {', '.join(sorted(missing))})"
+    return None
+
+
+_NATIVE_DEFT_GAP = _native_deft_runtime_gap()
+
+requires_native_deft = pytest.mark.skipif(
+    _NATIVE_DEFT_GAP is not None,
+    reason=f"native DINOv3 DEFT runtime unavailable: {_NATIVE_DEFT_GAP}",
 )
 
 
@@ -548,6 +597,7 @@ def test_registered_store_requires_payload_contract_lineage(tmp_path: Path) -> N
         workflow.validate()
 
 
+@requires_native_deft
 def test_store_is_reverified_after_controller_lock(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     original = tmp_path / "source.parquet"
@@ -602,6 +652,7 @@ def test_store_is_reverified_after_controller_lock(tmp_path: Path) -> None:
     assert lock["source_store"]["shards"][0]["relative_path"] == replacement.name
 
 
+@requires_native_deft
 def test_search_rejects_store_replaced_after_initialization(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     source = tmp_path / "source.parquet"
@@ -658,6 +709,7 @@ def test_search_rejects_store_replaced_after_initialization(tmp_path: Path) -> N
         workflow.execute()
 
 
+@requires_native_deft
 @pytest.mark.parametrize("strategy", ["grit_score", "multi_task_round_robin"])
 def test_local_workflow_smoke_and_resume(tmp_path: Path, strategy: str) -> None:
     workflow = RefinementWorkflow(_config(tmp_path, strategy))
@@ -678,6 +730,7 @@ def test_local_workflow_smoke_and_resume(tmp_path: Path, strategy: str) -> None:
     assert (tmp_path / "run" / "events.jsonl").read_text(encoding="utf-8") == events_before
 
 
+@requires_native_deft
 def test_metric_patience_stops_and_delivers_best_checkpoint(
     tmp_path: Path,
 ) -> None:
@@ -751,6 +804,7 @@ def test_early_stopping_requires_evaluation(tmp_path: Path) -> None:
         WorkflowConfig.from_dict(value)
 
 
+@requires_native_deft
 def test_balanced_multitask_workflow_publishes_unique_and_training_views(
     tmp_path: Path,
 ) -> None:
@@ -774,6 +828,7 @@ def test_balanced_multitask_workflow_publishes_unique_and_training_views(
     assert checkpoint["training_rows"] == len(training)
 
 
+@requires_native_deft
 def test_resume_rejects_changed_source_shard(tmp_path: Path) -> None:
     workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
     workflow.execute()
@@ -792,6 +847,7 @@ def test_resume_rejects_changed_source_shard(tmp_path: Path) -> None:
         workflow.execute()
 
 
+@requires_native_deft
 @pytest.mark.parametrize("strategy", ["grit_score", "multi_task_round_robin"])
 def test_every_round_trains_from_immutable_base_checkpoint(
     tmp_path: Path, strategy: str
@@ -894,6 +950,7 @@ def test_training_allocation_graduates_without_dropping_update_floor() -> None:
         assert allocation["total_optimizer_steps"] == 2304
 
 
+@requires_native_deft
 def test_dynamic_training_allocation_is_recorded_and_passed_to_leaf(
     tmp_path: Path,
 ) -> None:
@@ -997,6 +1054,7 @@ def test_previous_round_checkpoint_policy_is_rejected(tmp_path: Path) -> None:
         WorkflowConfig.from_dict(value)
 
 
+@requires_native_deft
 def test_audited_ann_search_is_staged_and_resumable(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     source = tmp_path / "source.parquet"
@@ -1194,6 +1252,7 @@ def test_audited_ann_search_is_staged_and_resumable(tmp_path: Path) -> None:
     ) == events_before
 
 
+@requires_native_deft
 def test_completed_checkpoint_tamper_is_rejected(tmp_path: Path) -> None:
     workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
     state = workflow.execute()
@@ -1270,6 +1329,7 @@ def test_parent_history_is_explicit_in_plan(tmp_path: Path) -> None:
     assert config.plan()["initialization"] == "base_checkpoint_with_parent_data_history"
 
 
+@requires_native_deft
 def test_parent_history_materializes_cumulative_manifest(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     parent = tmp_path / "parent.parquet"
@@ -1300,6 +1360,7 @@ def test_parent_history_materializes_cumulative_manifest(tmp_path: Path) -> None
     assert artifact["payload"]["row_count"] == 2
 
 
+@requires_native_deft
 def test_checkpoint_symlink_name_is_preserved_for_training(tmp_path: Path) -> None:
     config = _config(tmp_path, "grit_score").to_dict()
     blob = tmp_path / "checkpoint-blob"
@@ -1319,6 +1380,7 @@ def test_checkpoint_symlink_name_is_preserved_for_training(tmp_path: Path) -> No
     assert checkpoint["parent"] == str(alias.absolute())
 
 
+@requires_native_deft
 def test_completed_native_training_is_finalized_without_relaunch_after_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1885,6 +1947,7 @@ def test_release_lock_covers_builtin_ds_implementations(
 
 
 
+@requires_native_deft
 def test_native_lock_covers_dinov3_and_inherited_nvdinov2_runtime(
     tmp_path: Path,
 ) -> None:
@@ -1933,6 +1996,7 @@ def test_native_lock_covers_dinov3_and_inherited_nvdinov2_runtime(
         ]
 
 
+@requires_native_deft
 def test_config_change_requires_fork(tmp_path: Path) -> None:
     config = _config(tmp_path, "grit_score")
     workflow = RefinementWorkflow(config)
@@ -1957,6 +2021,7 @@ def test_score_rejects_changed_target_embedding(tmp_path: Path) -> None:
         RefinementWorkflow(WorkflowConfig.from_dict(value)).execute()
 
 
+@requires_native_deft
 def test_score_rejects_unapproved_implementation(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     value["execution"]["environment"]["FAKE_IMPLEMENTATION_SHA256"] = (
@@ -2007,6 +2072,7 @@ def test_cuda_grit_requires_declared_gpu_faiss_capability(tmp_path: Path) -> Non
     }
 
 
+@requires_native_deft
 @pytest.mark.parametrize("profile", ["local", "external", "containerized"])
 def test_generated_stage_request_matches_published_contract_schema(
     tmp_path: Path, profile: str,
@@ -2104,6 +2170,7 @@ def test_local_runner_probes_required_gpu_faiss_before_launch(
         runner.run(request)
     assert not (tmp_path / "jobs/gpu-faiss-preflight.json").exists()
 
+@requires_native_deft
 def test_score_rejects_target_changed_after_request_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -2135,6 +2202,7 @@ def test_score_rejects_target_changed_after_request_snapshot(
         workflow.execute()
 
 
+@requires_native_deft
 def test_failed_resume_revalidates_completed_training_before_scoring(
     tmp_path: Path,
 ) -> None:
@@ -2174,6 +2242,7 @@ def test_failed_resume_revalidates_completed_training_before_scoring(
         workflow.execute()
 
 
+@requires_native_deft
 @pytest.mark.parametrize("failed_stage", ["train", "evaluate"])
 def test_retry_preserves_completed_round_inputs(
     tmp_path: Path, failed_stage: str,
@@ -2296,6 +2365,7 @@ def test_evaluation_rejects_nonfinite_base_metric(tmp_path: Path) -> None:
         RefinementWorkflow(WorkflowConfig.from_dict(value)).execute()
 
 
+@requires_native_deft
 def test_trace_contains_stage_jobs(tmp_path: Path) -> None:
     workflow = RefinementWorkflow(_config(tmp_path, "multi_task_round_robin"))
     workflow.execute()
@@ -2666,6 +2736,7 @@ def test_local_runner_adopts_terminal_record_after_controller_crash(
     assert runner.run(request).state == "COMPLETE"
 
 
+@requires_native_deft
 def test_adapter_managed_uses_one_wrapper_and_records_delegated_allocation(
     tmp_path: Path,
 ) -> None:
@@ -2771,6 +2842,7 @@ def test_adapter_managed_uses_one_wrapper_and_records_delegated_allocation(
     assert prepared["train"]["gpu_ids"] == [0]
 
 
+@requires_native_deft
 @pytest.mark.parametrize("execution_mode", ["runner", "adapter_managed"])
 def test_training_preserves_non_gpu_resource_contract(
     tmp_path: Path, execution_mode: str,
