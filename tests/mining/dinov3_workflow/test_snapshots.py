@@ -6,10 +6,47 @@
 import hashlib
 import os
 from pathlib import Path
+import time
 
 import pytest
 
 from nvidia_tao_ds.mining.dinov3.workflow import controller, native_actions, snapshots
+
+
+def _advance_filesystem_clock(reference: os.stat_result, directory: Path) -> None:
+    """Block until the filesystem clock is strictly past ``reference``.
+
+    Linux stamps inodes from a clock whose resolution is the filesystem's
+    timestamp granularity.  Kernels without fine-grained timestamps (< 6.13)
+    advance that clock only once per timer tick -- 4-10 ms depending on
+    ``CONFIG_HZ`` -- so two writes issued inside the same tick are recorded with
+    byte-identical ``st_mtime_ns`` and ``st_ctime_ns``.
+
+    The mutation tests below rewrite ``checkpoint`` in place with a replacement
+    of exactly the same length, which leaves ``st_dev``, ``st_ino`` and
+    ``st_size`` untouched.  When the timestamps also collide, the whole stat
+    identity is unchanged and ``snapshots`` correctly reports the file as
+    unmodified -- there is no stat field left that could reveal the edit.  That
+    made both ``[rewrite]`` cases pass on fine-grained workstations and fail on
+    the coarse-grained kernel CI runs on.
+
+    Waiting for the next tick makes the mutation observable without weakening
+    what the tests assert.  The ``[replace]`` cases never needed this because
+    ``Path.replace`` installs a new inode and therefore changes ``st_ino``.
+    """
+    probe = directory / ".timestamp-probe"
+    floor = max(reference.st_mtime_ns, reference.st_ctime_ns)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        probe.write_bytes(b"")
+        stamp = probe.stat()
+        probe.unlink()
+        if stamp.st_mtime_ns > floor and stamp.st_ctime_ns > floor:
+            return
+        time.sleep(0.001)
+    raise AssertionError(
+        "filesystem timestamp clock did not advance; cannot make the mutation observable"
+    )
 
 
 @pytest.fixture
@@ -46,6 +83,7 @@ def test_same_size_and_mtime_does_not_hide_changed_content(counted_input, mutati
     with snapshots.snapshot_cache():
         original = snapshots.file_sha256(path)
         stat = path.stat()
+        _advance_filesystem_clock(stat, path.parent)
         if mutation == "replace":
             replacement = path.with_suffix(".new")
             replacement.write_bytes(b"modified")
@@ -94,6 +132,7 @@ def test_mutation_during_read_fails_and_is_not_cached(counted_input, monkeypatch
     def mutate(fd):
         calls.append(fd)
         if len(calls) == 2:
+            _advance_filesystem_clock(path.stat(), path.parent)
             if mutation == "replace":
                 replacement = path.with_suffix(".new")
                 replacement.write_bytes(b"modified")
