@@ -25,6 +25,7 @@ repository mental model, command flow, configuration flow, or validation map.
 | [testing_and_debugging.md](testing_and_debugging.md) | CI static checks, targeted pytest commands, GPU-sensitive paths, and failure triage. |
 | [container_power_users.md](container_power_users.md) | `tao_ds`, mounts, GPUs, base-image digests, service mode, and direct Docker equivalents. |
 | [new_data_service_command.md](new_data_service_command.md) | Source-backed guide for adding or extending commands and subtasks. |
+| [dinov3_refinement.md](dinov3_refinement.md) | Versioned embedding-store, selection, search, and cumulative-manifest actions for SSL refinement. |
 
 ## Repository Anchors
 
