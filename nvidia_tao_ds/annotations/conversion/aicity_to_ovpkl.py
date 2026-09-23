@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Convert AICity annotations to OVPKL format"""
@@ -18,13 +18,86 @@ from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
 
 from spatialai_data_utils.constants import FPS
-from spatialai_data_utils.utils.camera_name_utils import get_cam_names_in_scene
 from spatialai_data_utils.loaders.calibration import load_calib
-from spatialai_data_utils.visualization.video_utils.video2frame import video2frame_multi_cameras_syn
+try:
+    # spatialai-data-utils < 2.0
+    from spatialai_data_utils.utils.camera_name_utils import get_cam_names_in_scene
+except ImportError:
+    # spatialai-data-utils >= 2.0
+    from spatialai_data_utils.datasets.scenes import get_cam_names_in_scene
+try:
+    # Removed in spatialai-data-utils 2.0; retained for legacy container images.
+    from spatialai_data_utils.visualization.video_utils.video2frame import (
+        video2frame_multi_cameras_syn,
+    )
+except ImportError:
+    video2frame_multi_cameras_syn = None
 
 X, Y, Z, W, L, H, SIN_YAW, COS_YAW, VX, VY, VZ = list(range(11))  # undecoded
 CNS, YNS = 0, 1  # centerness and yawness indices in qulity
 YAW = 6  # decoded
+
+AICITY_OVPKL_SCHEMA_VERSION = "aicity_ovpkl/v1"
+_GENERATED_ANNOTATION_CACHE_FILENAMES = {
+    "_pkl_cam_counts.pkl",
+}
+_H5_SUFFIXES = (".h5", ".hdf5")
+
+
+def _is_h5_path(path):
+    """Return whether a path uses a supported HDF5 filename suffix."""
+    return str(path).lower().endswith(_H5_SUFFIXES)
+
+
+def _camera_name_from_storage(storage_name):
+    """Return the calibration camera name for a directory or HDF5 file."""
+    storage_name = str(storage_name)
+    if _is_h5_path(storage_name):
+        return os.path.splitext(storage_name)[0]
+    return storage_name
+
+
+def _find_h5_filename(directory, camera_name):
+    """Resolve an HDF5 camera filename without appending a duplicate suffix."""
+    base_name = _camera_name_from_storage(os.path.basename(str(camera_name)))
+    candidates = [f"{base_name}.h5", f"{base_name}.hdf5"]
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(directory, candidate)):
+            return candidate
+    return candidates[0]
+
+
+def _get_h5_depth_path(scene_path, scene_name, camera_storage_name, frame_id):
+    """Return absolute/relative HDF5 depth references for one camera frame."""
+    depth_filename_in_h5 = f"distance_to_image_plane_{frame_id:05}.png"
+    depth_dir = os.path.join(scene_path, "depth_maps")
+    camera_name = _camera_name_from_storage(camera_storage_name)
+    if os.path.isdir(depth_dir):
+        depth_filename = _find_h5_filename(depth_dir, camera_name)
+        absolute_path = os.path.join(depth_dir, depth_filename)
+        relative_path = os.path.join(scene_name, "depth_maps", depth_filename)
+        depth_key = depth_filename_in_h5
+    else:
+        if _is_h5_path(camera_storage_name):
+            depth_filename = str(camera_storage_name)
+        else:
+            depth_filename = _find_h5_filename(scene_path, camera_name)
+        absolute_path = os.path.join(scene_path, depth_filename)
+        relative_path = os.path.join(scene_name, depth_filename)
+        depth_key = os.path.join(
+            "distance_to_image_plane_png",
+            depth_filename_in_h5,
+        )
+    return (absolute_path, depth_key), (relative_path, depth_key)
+
+
+def _is_annotation_pkl(filename):
+    """Return whether a filename is a scene annotation rather than an index."""
+    return (
+        filename.endswith(".pkl") and
+        filename not in _GENERATED_ANNOTATION_CACHE_FILENAMES and
+        not filename.endswith("_lazy_index.pkl")
+    )
 
 
 def convert_aicity_to_ovpkl(
@@ -137,10 +210,16 @@ def _video_to_frames(video_path: str, image_dir: str, num_frames: int = -1):
             command.extend(["-frames:v", str(num_frames)])
         command.extend(["-start_number", "0", os.path.join(image_dir, "%09d.jpg")])
         subprocess.run(command, check=True)
-    else:
+    elif video2frame_multi_cameras_syn is not None:
         # Compatibility path for older images. New release images deliberately
         # build OpenCV without FFmpeg and provide the audited ffmpeg binary.
         video2frame_multi_cameras_syn(os.path.dirname(os.path.dirname(video_path)))
+    else:
+        raise RuntimeError(
+            "No supported video decoder is available. Install ffmpeg or use a "
+            "legacy spatialai-data-utils package with "
+            "video2frame_multi_cameras_syn."
+        )
 
     produced_frames = [
         name for name in os.listdir(image_dir)
@@ -162,7 +241,10 @@ def video_to_frame(root_path: str, splits: list, num_frames: int = -1):
     """
     for split in splits:
         split_root_path = os.path.join(root_path, split)
-        scene_names = os.listdir(split_root_path)
+        scene_names = sorted(
+            name for name in os.listdir(split_root_path)
+            if os.path.isdir(os.path.join(split_root_path, name))
+        )
         for scene_name in scene_names:
             scene_path = os.path.join(split_root_path, scene_name)
             logger.info(f" Converting video to frames for scene: {scene_path}...")
@@ -249,7 +331,10 @@ def create_ov_infos_aicity2025(
         recentering (bool): Whether to recenter the data.
     """
     split_root_path = os.path.join(root_path, split)
-    scene_names = os.listdir(split_root_path)
+    scene_names = sorted(
+        name for name in os.listdir(split_root_path)
+        if os.path.isdir(os.path.join(split_root_path, name))
+    )
 
     logger.info(
         f"split_type: {split} | # of scenes: {len(scene_names)} | scene names: {scene_names}"
@@ -266,7 +351,12 @@ def create_ov_infos_aicity2025(
         verbose=verbose,
     )
 
-    metadata = {"version": version, "split_type": split}
+    metadata = {
+        "version": version,
+        "split_type": split,
+        "schema_version": AICITY_OVPKL_SCHEMA_VERSION,
+        "class_names": [str(name) for name in class_config["CLASS_LIST"]],
+    }
     data = {}
     data["metadata"] = metadata
 
@@ -309,6 +399,7 @@ def _fill_trainval_infos(
         tuple[list[dict]]: Information of training set and validation set
             that will be saved to the info file.
     """
+    scene_names = sorted(scene_names)
     logger.info(f"scene_names to be processed: {scene_names}")
 
     infos = []
@@ -336,7 +427,7 @@ def _fill_trainval_infos(
             camera_group_config=camera_group_config,
         )
         if verbose:
-            for g in calib_dict.keys():
+            for g in sorted(calib_dict):
                 logger.info(f"  # of cameras in {scene_name} {g}: {len(calib_dict[g])} | {list(calib_dict[g].keys())}")
 
         if load_anno:
@@ -345,7 +436,9 @@ def _fill_trainval_infos(
             with open(os.path.join(scene_path, "ground_truth.json"), "r", encoding='utf-8') as f:
                 ground_truths_dict = json.load(f)
 
-        cam_names = get_cam_names_in_scene(scene_path, h5_file=(rgb_format == "h5"))
+        cam_names = sorted(
+            get_cam_names_in_scene(scene_path, h5_file=(rgb_format == "h5"))
+        )
         if rgb_format == "h5":
             with h5py.File(os.path.join(scene_path, cam_names[0]), "r") as f:
                 n_frames = len(f["rgb"])
@@ -356,7 +449,7 @@ def _fill_trainval_infos(
                     os.listdir(
                         os.path.join(
                             scene_path,
-                            list(calib_dict[list(calib_dict.keys())[0]].keys())[0],
+                            sorted(calib_dict[sorted(calib_dict)[0]])[0],
                             "rgb"
                         )
                     )
@@ -366,7 +459,7 @@ def _fill_trainval_infos(
                     os.listdir(
                         os.path.join(
                             scene_path,
-                            list(calib_dict.keys())[0],
+                            sorted(calib_dict)[0],
                             "rgb"
                         )
                     )
@@ -379,7 +472,7 @@ def _fill_trainval_infos(
         if camera_group_config is not None and \
                 (camera_group_config["use_camera_groups"] or camera_group_config["use_training_camera_groups"]):
             sub_scene_names = []
-            for group_name in calib_dict.keys():
+            for group_name in sorted(calib_dict):
                 sub_scene_names.append(f"{scene_name}+{group_name}")
         else:
             sub_scene_names = [scene_name]
@@ -417,10 +510,7 @@ def _fill_trainval_infos(
                             group_origin = group_area_dict[group_name]["origin"]
 
                 for cam_name in cam_names:
-                    if cam_name.endswith(".h5"):
-                        cam = cam_name.split(".")[0]
-                    else:
-                        cam = cam_name
+                    cam = _camera_name_from_storage(cam_name)
                     if camera_group_config is not None and \
                             (camera_group_config["use_camera_groups"] or camera_group_config["use_training_camera_groups"]):
                         if cam not in calib_dict[group_name]:
@@ -442,12 +532,12 @@ def _fill_trainval_infos(
                             logger.warning(f"no file found at {cam_path}")
                     if load_anno:
                         if depth_format == "h5":
-                            if os.path.isdir(os.path.join(scene_path, "depth_maps")):
-                                dm_path = (os.path.join(scene_path, "depth_maps", f"{cam_name}.h5"), f"distance_to_image_plane_{frame_id:05}.png")
-                                dm_relative_path = (f"{scene_name}/depth_maps/{cam_name}.h5", f"distance_to_image_plane_{frame_id:05}.png")
-                            else:
-                                dm_path = (os.path.join(scene_path, cam_name), os.path.join("distance_to_image_plane_png", f"distance_to_image_plane_{frame_id:05}.png"))
-                                dm_relative_path = (f"{scene_name}/{cam_name}", os.path.join("distance_to_image_plane_png", f"distance_to_image_plane_{frame_id:05}.png"))
+                            dm_path, dm_relative_path = _get_h5_depth_path(
+                                scene_path,
+                                scene_name,
+                                cam_name,
+                                frame_id,
+                            )
                             if not os.path.exists(dm_path[0]):
                                 logger.warning(f"no file found at {dm_path[0]}")
                         else:
@@ -509,10 +599,14 @@ def _fill_trainval_infos(
                             map_object_hash_to_object_id["objects"][object_name] = map_object_hash_to_object_id["max_object_id"]
                             map_object_hash_to_object_id["no_of_objects"] = len(map_object_hash_to_object_id["objects"])
                         instance_global_inds.append(map_object_hash_to_object_id["objects"][object_name])
-                    instance_global_inds = np.array(instance_global_inds)
+                    instance_global_inds = np.asarray(
+                        instance_global_inds,
+                        dtype=np.int64,
+                    )
 
-                    instance_inds = np.array(
-                        [anno["object id"] for anno in annotations]
+                    instance_inds = np.asarray(
+                        [anno["object id"] for anno in annotations],
+                        dtype=np.int64,
                     )  # TODO: check if duplicated ids for different object types
                     velocity = _get_object_velocity(locs, instance_inds, annotations_prev)
                     valid_flag = np.array(
@@ -526,39 +620,43 @@ def _fill_trainval_infos(
                     # filter by object type
                     names = [anno["object type"] for anno in annotations]
                     names = [class_config["MAP_SUB_CLASS_TO_CLASS_DICT"].get(n, n) for n in names]
-                    names = np.array(names)
+                    names = np.asarray(names, dtype=str)
                     keep = [n in class_config["CLASS_LIST"] for n in names]
 
-                    if annotations[0].get("2d bounding box", None) is not None:
-                        boxes_2d_full = [
-                            {c: np.array(b) for c, b in anno.get("2d bounding box", {}).items()}
-                            for anno in annotations
-                        ]
-                        boxes_2d_visible = [
-                            {c: np.array(b) for c, b in anno.get("2d bounding box visible", {}).items()}
-                            for anno in annotations
-                        ]
+                    boxes_2d_full = []
+                    boxes_2d_visible = []
+                    visibilities = []
+                    for annotation in annotations:
+                        full_value = annotation.get("2d bounding box")
+                        visible_value = annotation.get("2d bounding box visible")
+                        full_boxes = (
+                            {c: np.array(b) for c, b in full_value.items()}
+                            if full_value is not None else None
+                        )
+                        visible_boxes = (
+                            {c: np.array(b) for c, b in visible_value.items()}
+                            if visible_value is not None else None
+                        )
+                        boxes_2d_full.append(full_boxes)
+                        boxes_2d_visible.append(visible_boxes)
 
-                        visibilities = []
-                        for bfull, bvis in zip(boxes_2d_full, boxes_2d_visible):
-                            vis_per_cam_dict = {}
-                            for c in bfull.keys():
-                                if c in bvis:
-                                    ba_vis = _calculate_bbox_area(bvis[c])
-                                    ba_full = _calculate_bbox_area(bfull[c])
-                                    if ba_full == 0:
-                                        vis = 0.
-                                    else:
-                                        vis = ba_vis / ba_full
-                                else:
-                                    vis = 0.
-                                vis_per_cam_dict[c] = vis
-                            visibilities.append(vis_per_cam_dict)
-
-                    else:
-                        boxes_2d_full = [None for _ in annotations]
-                        boxes_2d_visible = [None for _ in annotations]
-                        visibilities = [-1 for _ in annotations]
+                        if full_boxes is None:
+                            visibilities.append(-1)
+                            continue
+                        visibility_by_camera = {}
+                        for camera_name, full_box in full_boxes.items():
+                            if visible_boxes is not None and camera_name in visible_boxes:
+                                visible_area = _calculate_bbox_area(
+                                    visible_boxes[camera_name]
+                                )
+                                full_area = _calculate_bbox_area(full_box)
+                                visibility = (
+                                    visible_area / full_area if full_area else 0.0
+                                )
+                            else:
+                                visibility = 0.0
+                            visibility_by_camera[camera_name] = visibility
+                        visibilities.append(visibility_by_camera)
 
                     # Initialize has_2d_boxes to prevent UnboundLocalError
                     has_2d_boxes = any(boxes_2d is not None and len(boxes_2d) > 0 for boxes_2d in boxes_2d_visible)
@@ -647,7 +745,7 @@ def _fill_trainval_infos(
             infos.append(train_scene_nusc_infos)
 
             with open(object_hash_to_object_id_file, 'w', encoding='utf-8') as f:
-                json.dump(map_object_hash_to_object_id, f)
+                json.dump(map_object_hash_to_object_id, f, sort_keys=True)
 
     return infos, sub_scene_names_out
 
@@ -708,7 +806,11 @@ def anchor_initialization(
             "infos": [],
             "metadata": {}
         }
-        ann_files = sorted([n for n in os.listdir(ann_file) if n.endswith(".pkl")])
+        ann_files = sorted(
+            name for name in os.listdir(ann_file)
+            if _is_annotation_pkl(name) and
+            os.path.isfile(os.path.join(ann_file, name))
+        )
         for ann_idx, scene_name in enumerate(ann_files):
             ann_path = os.path.join(ann_file, scene_name)
             if verbose:
@@ -721,7 +823,15 @@ def anchor_initialization(
         with open(ann_file, "rb") as f:
             data = pickle.load(f)
 
-    gt_boxes = np.concatenate([x["gt_boxes"] for x in data["infos"]], axis=0)
+    box_arrays = [
+        np.asarray(info["gt_boxes"])
+        for info in data["infos"]
+        if info.get("gt_boxes") is not None and np.asarray(info["gt_boxes"]).size
+    ]
+    gt_boxes = (
+        np.concatenate(box_arrays, axis=0)
+        if box_arrays else np.zeros((0, 7), dtype=np.float32)
+    )
     logger.info(f"Number of ground truth boxes: {len(gt_boxes)}")
     if sample_ratio > 0:
         gt_boxes = gt_boxes[::sample_ratio]
