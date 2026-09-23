@@ -311,8 +311,11 @@ def _decode_camera(name: str, value: dict) -> Optional[Tuple[str, dict]]:
     if intrinsic is None or world2cam is None:
         camera_matrix = value.get("cameraMatrix")
         if camera_matrix is not None:
-            intrinsic = np.eye(3, dtype=np.float64)
-            world2cam = _reshape_world2cam(camera_matrix)
+            raise ValueError(
+                f"Camera {name!r}: cameraMatrix-only calibration is a projection, "
+                "not a rigid transform. LTT geometry requires separate "
+                "intrinsics and world-to-camera extrinsics."
+            )
     if intrinsic is None or world2cam is None:
         return None
     if not np.isfinite(intrinsic).all():

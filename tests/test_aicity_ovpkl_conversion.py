@@ -47,6 +47,22 @@ _CLASS_CONFIG = {
 }
 
 
+@pytest.mark.parametrize("h5_file", [False, True])
+def test_camera_discovery_uses_real_spatialai_api(tmp_path, h5_file):
+    """Exercise the installed 1.x/2.x API, not a camera-discovery mock."""
+    names = ["Camera.0002", "Camera.0001"]
+    for name in names:
+        path = tmp_path / (name + ".h5" if h5_file else name)
+        if h5_file:
+            with h5py.File(path, "w"):
+                pass
+        else:
+            path.mkdir()
+    (tmp_path / "ignore.txt").write_text("fixture", encoding="utf-8")
+    expected = [name + ".h5" if h5_file else name for name in sorted(names)]
+    assert aicity_to_ovpkl.get_cam_names_in_scene(str(tmp_path), h5_file=h5_file) == expected
+
+
 def _write_h5_scene(split_root, scene_name, separate_depth):
     """Create a minimal two-frame AICity scene using real HDF5 containers."""
     scene_dir = split_root / scene_name

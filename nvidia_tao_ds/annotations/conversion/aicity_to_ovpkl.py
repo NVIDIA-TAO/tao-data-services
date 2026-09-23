@@ -22,7 +22,7 @@ from spatialai_data_utils.loaders.calibration import load_calib
 try:
     # spatialai-data-utils < 2.0
     from spatialai_data_utils.utils.camera_name_utils import get_cam_names_in_scene
-except ModuleNotFoundError:
+except ImportError:
     # spatialai-data-utils >= 2.0
     from spatialai_data_utils.datasets.scenes import get_cam_names_in_scene
 try:

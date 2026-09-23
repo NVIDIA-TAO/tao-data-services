@@ -67,15 +67,17 @@ def resolve_annotation_paths(annotation_source: os.PathLike | str) -> list[Path]
                 if not stripped or stripped.startswith("#"):
                     continue
                 value = Path(stripped.split()[0]).expanduser()
-                if not value.is_absolute():
-                    value = source.parent / value
                 paths.append(value)
     else:
         raise ValueError(
             f"Expected an annotation directory or split .txt file: {source}"
         )
 
-    paths = [path.resolve() for path in paths]
+    # Match runtime CWD-relative split semantics without resolving symlinks:
+    # container-visible mount aliases must survive in stored pkl_path values.
+    paths = [Path(os.path.abspath(path)) for path in paths]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Duplicate annotation PKL paths in split")
     if not paths:
         raise ValueError(f"No annotation PKLs found in: {source}")
     generated = [
@@ -176,7 +178,7 @@ def _signature_from_stat(stat_result: os.stat_result) -> dict[str, int]:
 
 def _index_one_pkl(pkl_path: Path | str) -> tuple:
     """Return validated entries and cache bookkeeping for one PKL."""
-    path = Path(pkl_path).expanduser().resolve()
+    path = Path(os.path.abspath(Path(pkl_path).expanduser()))
     try:
         stat_before = path.stat()
         document, metadata = _load_annotation_document(path)
@@ -229,7 +231,7 @@ def _index_one_pkl(pkl_path: Path | str) -> tuple:
             len(entries),
         )
     except Exception as error:
-        raise RuntimeError(f"Failed to index annotation PKL: {path}") from error
+        raise ValueError(f"Failed to index annotation PKL: {path}") from error
 
 
 def _load_pickle_mapping(path: Path) -> dict:
@@ -323,7 +325,7 @@ def _read_current_metadata(annotation_paths: list[Path]) -> dict:
             if _signature_from_stat(stat_before) != _signature_from_stat(stat_after):
                 raise ValueError("annotation PKL changed while reading metadata")
         except Exception as error:
-            raise RuntimeError(
+            raise ValueError(
                 f"Failed to read annotation metadata: {path}"
             ) from error
         if metadata:
@@ -368,7 +370,7 @@ def build_lazy_index(
         if camera_counts_path is not None
         else get_camera_counts_path(source)
     )
-    source_paths = {source.resolve(), *unique_paths}
+    source_paths = {source.resolve(), *(path.resolve() for path in unique_paths)}
     resolved_cache_path = cache_path.resolve()
     if resolved_cache_path in source_paths:
         raise ValueError(

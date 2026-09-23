@@ -64,6 +64,8 @@ def validate_scene_name(scene_name: str) -> str:
         raise ValueError(
             "scene_name must be a plain filename component without traversal"
         )
+    if "+" in scene_name:
+        raise ValueError("scene_name must not contain '+', the runtime BEV-group separator")
     return scene_name
 
 

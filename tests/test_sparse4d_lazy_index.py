@@ -15,6 +15,12 @@ from nvidia_tao_ds.annotations.sparse4d.lazy_index import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _runtime_cwd(tmp_path, monkeypatch):
+    """Use the same working directory for producer and runtime relative paths."""
+    monkeypatch.chdir(tmp_path)
+
+
 def _write_document(path: Path, infos: list[dict], metadata=None):
     """Write one trusted annotation document for a focused fixture."""
     document = {"infos": infos}
@@ -48,8 +54,8 @@ def _write_pkl(
     )
 
 
-def test_split_paths_are_relative_to_the_split_and_incremental(tmp_path):
-    """Build the runtime-compatible index without depending on process CWD."""
+def test_split_paths_are_cwd_relative_and_incremental(tmp_path):
+    """Match the runtime CWD contract while refreshing only changed PKLs."""
     data_dir = tmp_path / "pkls"
     data_dir.mkdir()
     first = data_dir / "a.pkl"
@@ -179,7 +185,7 @@ def test_malformed_annotation_is_reported_with_its_path(tmp_path):
     with bad.open("wb") as stream:
         pickle.dump({"metadata": {}, "infos": [{"frame_idx": 0}]}, stream)
 
-    with pytest.raises(RuntimeError, match=str(bad)):
+    with pytest.raises(ValueError, match=str(bad)):
         build_lazy_index(tmp_path, num_workers=1)
 
 
@@ -212,7 +218,7 @@ def test_invalid_frame_sort_and_camera_fields_are_rejected(
     info[field] = value
     _write_document(tmp_path / "bad.pkl", [info], metadata={})
 
-    with pytest.raises(RuntimeError, match=str(tmp_path / "bad.pkl")) as error:
+    with pytest.raises(ValueError, match=str(tmp_path / "bad.pkl")) as error:
         build_lazy_index(tmp_path, num_workers=1)
     assert message in str(error.value.__cause__)
 
@@ -236,7 +242,7 @@ def test_camera_names_are_consistent_and_empty_cameras_are_valid(tmp_path):
         ],
         metadata={},
     )
-    with pytest.raises(RuntimeError, match=str(inconsistent)) as error:
+    with pytest.raises(ValueError, match=str(inconsistent)) as error:
         build_lazy_index(tmp_path, num_workers=1)
     assert "camera names" in str(error.value.__cause__)
 
@@ -384,3 +390,35 @@ def test_malformed_cached_bookkeeping_is_rebuilt(tmp_path):
 
     assert rebuilt["num_reused_pkls"] == 0
     assert rebuilt["num_indexed_pkls"] == 1
+
+
+def test_symlink_mount_paths_are_preserved_in_all_index_keys(tmp_path):
+    """Do not replace paths visible in the container with resolved host paths."""
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    _write_pkl(physical / "scene.pkl", "scene", camera_count=2)
+    mount = tmp_path / "mounted"
+    mount.symlink_to(physical, target_is_directory=True)
+    split_dir = tmp_path / "splits"
+    split_dir.mkdir()
+    split = split_dir / "train.txt"
+    split.write_text("mounted/scene.pkl\n", encoding="utf-8")
+
+    result = build_lazy_index(split, num_workers=1)
+    with open(result["cache_path"], "rb") as stream:
+        index = pickle.load(stream)
+    expected = str(mount / "scene.pkl")
+    assert {row["pkl_path"] for row in index["frame_index"]} == {expected}
+    assert set(index["signatures"]) == {expected}
+    assert index["pkl_cam_counts"] == {expected: 2}
+
+
+def test_duplicate_split_rows_fail_before_index_creation(tmp_path):
+    """Sampling weights must not accidentally multiply indexed training frames."""
+    source = tmp_path / "scene.pkl"
+    _write_pkl(source, "scene", camera_count=1)
+    split = tmp_path / "train.txt"
+    split.write_text(f"{source}\n{source} weight=2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Duplicate"):
+        build_lazy_index(split, num_workers=1)
+    assert not (tmp_path / "train_lazy_index.pkl").exists()

@@ -99,7 +99,7 @@ def test_ltt_2dgt_operation_writes_empty_scene_and_guards_overwrite(tmp_path):
     with pytest.raises(FileExistsError, match="Refusing to replace"):
         run_operation(cfg)
 
-    cfg.ltt_2dgt.overwrite = True
+    cfg.overwrite = True
     assert run_operation(cfg)["num_scenes"] == 1
 
 
@@ -118,7 +118,7 @@ def test_ltt_2dgt_rejects_duplicate_output_paths_before_writing(tmp_path):
     cfg.operation = "ltt_2dgt"
     cfg.ltt_2dgt.selection.scene_dirs = [str(scene) for scene in scenes]
     cfg.ltt_2dgt.output_dir = str(output_dir)
-    cfg.ltt_2dgt.overwrite = True
+    cfg.overwrite = True
 
     with pytest.raises(
         ValueError,

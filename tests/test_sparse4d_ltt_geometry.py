@@ -242,3 +242,37 @@ def test_extraction_rejects_empty_result(tmp_path):
             metadata={"source": "fixture"},
             min_visibility=0.9,
         )
+
+
+def test_geometry_values_for_axis_aligned_box(tmp_path):
+    """Pin projection and camera distance numerically, not just array shapes."""
+    scene = _write_scene(tmp_path)
+    annotation = _annotation()
+    annotation["3d bounding box rotation"] = [0.0, 0.0, 0.0]
+    (scene / "ground_truth.json").write_text(
+        json.dumps({"0": [annotation]}), encoding="utf-8"
+    )
+    summary = extract_ltt_data(
+        [scene], tmp_path / "numeric.npz", CLASSES,
+        build_name_to_id(CLASSES), frame_stride=1,
+    )
+    row = load_contract(summary["artifact_path"], LTT_DATA_SCHEMA_VERSION)["packed"][0]
+    np.testing.assert_allclose(row[ltt_geometry.SL_EXTENT], [2, 2, 2])
+    np.testing.assert_allclose(
+        row[ltt_geometry.SL_LOOSE], [38.888889, 38.888889, 61.111111, 61.111111], atol=1e-5
+    )
+    np.testing.assert_allclose(row[ltt_geometry.SL_TIGHT], [35, 35, 65, 65])
+    assert row[ltt_geometry.I_DISTANCE] == pytest.approx(10.0)
+    assert row[I_VISIBILITY] == pytest.approx(4 / 9)
+
+
+def test_projection_only_calibration_is_rejected_for_ltt_geometry(tmp_path):
+    """A projection matrix cannot stand in for a metric rigid transform."""
+    scene = _write_scene(tmp_path)
+    calibration = {"sensors": [{
+        "id": "cam0", "type": "camera",
+        "cameraMatrix": [[100, 0, 50, 0], [0, 100, 50, 0], [0, 0, 1, 0]],
+    }]}
+    (scene / "calibration.json").write_text(json.dumps(calibration), encoding="utf-8")
+    with pytest.raises(ValueError, match="separate intrinsics"):
+        ltt_geometry.load_scene_calibration(scene)

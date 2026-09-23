@@ -1,7 +1,8 @@
 # Sparse4D data preparation. Only the block selected by operation is consumed.
 operation: lazy_index
+overwrite: false
 
-# Keep this order identical to model.head.loose_to_tight.class_names and the
+# Keep this order identical to dataset.classes in the training runtime and the
 # training dataset taxonomy. Artifact readers intentionally reject reordering.
 class_names:
   - person
@@ -43,7 +44,6 @@ ltt_2dgt:
   max_frames_per_scene: 0
   drop_names:
     - pallet
-  overwrite: false
 
 ltt_data:
   selection:

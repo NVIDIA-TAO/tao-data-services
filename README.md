@@ -125,11 +125,14 @@ check (`ci/run_static_tests.py`) verifies those digest references stay in sync.
 ## Sparse4D Data Preparation
 
 `annotations sparse4d_prepare` creates the versioned artifacts consumed by
-TAO Sparse4D. Start from the packaged example spec and select one operation:
+TAO Sparse4D. Locate the installed package's spec and select one operation
+(no source checkout required). The `annotations` launcher requires `-e`, even
+though the underlying Hydra script has a default:
 
 ```sh
+sparse4d_spec=$(python -c 'from importlib.resources import files; print(files("nvidia_tao_ds.annotations").joinpath("experiment_specs/sparse4d_prepare.yaml"))')
 annotations sparse4d_prepare \
-  -e nvidia_tao_ds/annotations/experiment_specs/sparse4d_prepare.yaml \
+  -e "$sparse4d_spec" \
   operation=lazy_index \
   lazy_index.annotation_source=/data/annotations/train.txt \
   results_dir=/results/sparse4d_prepare
@@ -149,8 +152,39 @@ Keep `class_names` identical, including order, to the TAO
 `dataset.classes` setting. For `sv2d`, enable
 `dataset.resize_to_canonical_2d` in TAO and use the same canonical height and
 width; the runtime rejects mismatched cache/image dimensions. Generated PKLs
-and lazy indexes contain resolved paths, so retain the same dataset mount paths
-between preparation and training or rebuild them after relocation.
+and lazy indexes contain absolute paths, so retain the same dataset mount paths
+between preparation and training or rebuild them after relocation. Lazy-index
+split rows are relative to the process working directory, matching the training
+runtime, not relative to the split file. Symlinked mount paths are preserved.
+Prefer absolute container-visible paths in split files. Duplicate PKL rows are
+rejected; use the sampler's weighting configuration instead.
+
+All operations default to `overwrite=false`. Existing outputs are checked
+before writing the operation's artifacts, including SV2D split/weight files
+and lazy-index camera counts. Set the top-level `overwrite=true` to opt in to
+replacement (this replaces the earlier `ltt_2dgt.overwrite` option). Successful
+CLI jobs atomically save `results_dir/sparse4d_prepare_summary.json`, containing
+the returned artifact paths and counts. Use a new results directory for each
+job, or explicitly enable overwrite when rerunning.
+
+RT-DETR labels outside `class_names` must have an explicit alias in
+`rtdetr_2d.class_map`, or map to `null` to be intentionally dropped. Unknown
+labels fail instead of silently creating valid background frames. For example,
+`{Human: person, pallet: null}` retains people and deliberately excludes pallets.
+Scene names must not contain `+`, the runtime's reserved BEV-group separator.
+
+LTT geometry requires separate camera intrinsics and rigid world-to-camera
+extrinsics. Projection-only `cameraMatrix` calibration is rejected for
+`ltt_data`; visible-box-only `ltt_2dgt` does not require metric camera geometry.
+Both LTT producers use the same frame iterator: numeric ordering for per-frame
+files, source ordering for monolithic JSON, ignored nonnumeric metadata keys,
+and rejected duplicate normalized frame IDs. Optional streaming JSON support
+does not change the selected frame subset.
+
+The AICity converter supports the camera-discovery import layouts in
+`spatialai_data_utils` 1.x and 2.x. Tests exercise the installed implementation
+with actual directories and HDF5 files; this change does not upgrade the
+data-service image's pinned dependency.
 
 ## Container Builds
 

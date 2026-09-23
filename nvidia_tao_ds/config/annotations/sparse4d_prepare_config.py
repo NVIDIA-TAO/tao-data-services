@@ -4,7 +4,7 @@
 """Configuration schema for TAO Sparse4D data preparation."""
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from omegaconf import MISSING
 
@@ -109,10 +109,6 @@ class LTT2DGTConfig:
         arrList=["pallet"],
         description="Source object types to omit explicitly.",
     )
-    overwrite: bool = BOOL_FIELD(
-        value=False,
-        description="Allow replacement of existing scene sidecars.",
-    )
 
 
 @dataclass
@@ -177,9 +173,9 @@ class RTDETR2DConfig:
         hashMap={},
         description="Map label archive directory names to calibration camera names.",
     )
-    class_map: Dict[str, str] = DICT_FIELD(
+    class_map: Dict[str, Optional[str]] = DICT_FIELD(
         hashMap={},
-        description="Map detector labels to names in class_names.",
+        description="Map detector labels to class_names; null explicitly drops a source label.",
     )
     confidence_threshold: float = FLOAT_FIELD(
         value=0.4,
@@ -238,6 +234,11 @@ class SV2DConfig:
 @dataclass
 class Sparse4DPrepareConfig:
     """Top-level Sparse4D artifact-preparation configuration."""
+
+    overwrite: bool = BOOL_FIELD(
+        value=False,
+        description="Allow replacement of existing outputs for the selected operation.",
+    )
 
     operation: str = STR_FIELD(
         value="lazy_index",

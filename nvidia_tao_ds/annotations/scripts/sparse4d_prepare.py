@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
-from nvidia_tao_ds.annotations.sparse4d.contracts import validate_class_names
-from nvidia_tao_ds.annotations.sparse4d.lazy_index import build_lazy_index
+from nvidia_tao_ds.annotations.sparse4d.contracts import normalize_npz_path, validate_class_names
+from nvidia_tao_ds.annotations.sparse4d.lazy_index import (
+    build_lazy_index, get_lazy_index_path, get_camera_counts_path,
+)
 from nvidia_tao_ds.annotations.sparse4d.ltt_geometry import (
     build_name_to_id,
     extract_ltt_data,
@@ -24,6 +27,7 @@ from nvidia_tao_ds.annotations.sparse4d.sv2d import (
     build_sv2d_artifacts,
     load_dataset_manifest,
     write_split_artifacts,
+    validate_suffix,
 )
 from nvidia_tao_ds.config.annotations.sparse4d_prepare_config import (
     Sparse4DPrepareConfig,
@@ -78,6 +82,11 @@ def _run_lazy_index(cfg: Sparse4DPrepareConfig) -> dict:
     """Build or incrementally refresh the trusted annotation index."""
     values = cfg.lazy_index
     workers = int(values.workers)
+    source = _required(values.annotation_source, "lazy_index.annotation_source")
+    outputs = [get_lazy_index_path(source)]
+    if values.write_camera_counts:
+        outputs.append(_optional(values.camera_counts_path) or get_camera_counts_path(source))
+    _guard_outputs(cfg, outputs)
     return build_lazy_index(
         _required(
             values.annotation_source,
@@ -117,11 +126,7 @@ def _run_ltt_2dgt(cfg: Sparse4DPrepareConfig) -> dict:
                 f"sidecar {expected_path}: {prior_scene} and {scene_path}"
             )
         output_owners[expected_path] = scene_path
-    existing = [path for path in expected_paths if path.exists()]
-    if existing and not values.overwrite:
-        raise FileExistsError(
-            f"Refusing to replace {len(existing)} sidecar(s); first: {existing[0]}"
-        )
+    _guard_outputs(cfg, expected_paths)
     outputs = [
         build_ltt_2dgt_scene(
             scene_path,
@@ -151,6 +156,7 @@ def _run_ltt_data(cfg: Sparse4DPrepareConfig) -> dict:
             "ltt_data.image_width and image_height must both be zero or positive"
         )
     image_size = (width, height) if width else None
+    _guard_outputs(cfg, [normalize_npz_path(_required(values.output_path, "ltt_data.output_path"))])
     return extract_ltt_data(
         _scene_paths(values.selection),
         _required(values.output_path, "ltt_data.output_path"),
@@ -175,10 +181,12 @@ def _run_ltt_data(cfg: Sparse4DPrepareConfig) -> dict:
 def _run_rtdetr_2d(cfg: Sparse4DPrepareConfig) -> dict:
     """Normalize archived RT-DETR KITTI labels into a safe cache."""
     values = cfg.rtdetr_2d
+    input_dir = _required(values.input_dir, "rtdetr_2d.input_dir")
+    _guard_outputs(cfg, [normalize_npz_path(_required(values.output_path, "rtdetr_2d.output_path"))])
     class_names, _, alias_map = _taxonomy(cfg)
     class_map = {**alias_map, **dict(values.class_map)}
     return build_rtdetr_archive_sidecar(
-        _required(values.input_dir, "rtdetr_2d.input_dir"),
+        input_dir,
         _required(values.output_path, "rtdetr_2d.output_path"),
         class_names=class_names,
         class_name_map=class_map,
@@ -210,6 +218,21 @@ def _run_sv2d(cfg: Sparse4DPrepareConfig) -> dict:
         )
     cache_dir = _required(values.cache_dir, "sv2d.cache_dir")
     pkl_dir = _required(values.pkl_dir, "sv2d.pkl_dir")
+    suffix = validate_suffix(str(values.suffix))
+    split_output = _optional(values.split_output)
+    if split_output is None and values.dataset == "all":
+        split_output = str(Path(pkl_dir).expanduser() / f"sv2d_train_split{suffix}.txt")
+    planned = []
+    for dataset in selected:
+        scene = dataset["scene_name"] + suffix
+        planned.extend([
+            Path(cache_dir).expanduser() / f"{scene}__rtdetr2d.npz",
+            Path(pkl_dir).expanduser() / f"{scene}_infos_train.pkl",
+        ])
+    if split_output:
+        split_path = Path(split_output).expanduser()
+        planned.extend([split_path, split_path.with_suffix(".sv2d_weights.json")])
+    _guard_outputs(cfg, planned)
     results = [
         build_sv2d_artifacts(
             dataset,
@@ -226,12 +249,6 @@ def _run_sv2d(cfg: Sparse4DPrepareConfig) -> dict:
         )
         for dataset in selected
     ]
-    split_output = _optional(values.split_output)
-    if split_output is None and values.dataset == "all":
-        split_output = str(
-            Path(pkl_dir).expanduser() /
-            f"sv2d_train_split{values.suffix}.txt"
-        )
     split_artifacts = (
         write_split_artifacts(results, selected, split_output)
         if split_output
@@ -253,6 +270,19 @@ _OPERATIONS = {
 }
 
 
+def _guard_outputs(cfg: Sparse4DPrepareConfig, paths) -> None:
+    """Preflight all artifacts before the selected operation writes any output."""
+    outputs = [Path(path).expanduser().resolve() for path in paths]
+    if len(outputs) != len(set(outputs)):
+        raise ValueError("Output paths collide within the selected operation")
+    existing = [path for path in outputs if path.exists()]
+    if existing and not cfg.overwrite:
+        raise FileExistsError(
+            f"Refusing to replace {len(existing)} output(s); first: {existing[0]}. "
+            "Set overwrite=true to replace existing artifacts."
+        )
+
+
 def run_operation(cfg: Sparse4DPrepareConfig) -> dict:
     """Run the selected operation and return its JSON-safe summary."""
     operation = str(cfg.operation)
@@ -269,8 +299,23 @@ def run_operation(cfg: Sparse4DPrepareConfig) -> dict:
 @monitor_status(name="Sparse4D", mode="data preparation")
 def run_sparse4d_prepare(cfg: Sparse4DPrepareConfig) -> None:
     """Run a Sparse4D data preparation operation with status reporting."""
-    summary = run_operation(cfg)
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    summary_path = Path(cfg.results_dir) / "sparse4d_prepare_summary.json"
+    try:
+        _guard_outputs(cfg, [summary_path])
+        summary = run_operation(cfg)
+        text = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+        descriptor, temporary = tempfile.mkstemp(prefix=".sparse4d-summary-", dir=summary_path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(text)
+            os.replace(temporary, summary_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        print(text, end="")
+    except OSError as error:
+        # monitor_status records ValueError failures for API callers.
+        raise ValueError(f"Sparse4D preparation I/O failed: {error}") from error
 
 
 @hydra_runner(

@@ -26,6 +26,7 @@ from nvidia_tao_ds.annotations.sparse4d.contracts import (
     write_ltt_2dgt,
     write_rtdetr_2d,
 )
+from nvidia_tao_ds.annotations.sparse4d.ltt_geometry import iter_gt_frames
 
 
 _FRAME_NUMBER = re.compile(r"(\d+)")
@@ -276,63 +277,21 @@ def iter_aicity_annotation_frames(
     frame_stride: int = 1,
     max_frames: int = 0,
 ):
-    """Yield deterministic AICity frame records from one raw scene directory."""
-    scene_path = Path(scene_dir).expanduser().resolve()
+    """Adapt the shared GT iterator to visible-sidecar frame records.
+
+    Both LTT producers use numeric per-frame ordering, source order for streamed
+    monolithic JSON, and ignore non-frame metadata keys.
+    """
     if isinstance(frame_stride, bool) or int(frame_stride) < 1:
         raise ValueError("frame_stride must be a positive integer")
     if isinstance(max_frames, bool) or int(max_frames) < 0:
         raise ValueError("max_frames must be a non-negative integer")
-    frame_stride = int(frame_stride)
-    max_frames = int(max_frames)
-    indexed = []
-    per_frame_dir = scene_path / "ground_truth_final"
-    if per_frame_dir.is_dir():
-        for path in per_frame_dir.glob("ground_truth_*.json"):
-            match = _FRAME_NUMBER.findall(path.stem)
-            if match:
-                indexed.append((_frame_id(match[-1]), path))
-        indexed.sort(key=lambda item: (item[0], str(item[1])))
-        seen = set()
-        emitted = 0
-        for current_frame_id, path in indexed:
-            if current_frame_id in seen:
-                raise ValueError(
-                    f"Multiple AICity files resolve to frame_id {current_frame_id}"
-                )
-            seen.add(current_frame_id)
-            if current_frame_id % frame_stride:
-                continue
-            with open(path, "r", encoding="utf-8") as stream:
-                frame_annotations = json.load(stream)
-            yield {"frame_id": current_frame_id, "annotations": frame_annotations}
-            emitted += 1
-            if max_frames and emitted >= max_frames:
-                return
-        return
-
-    ground_truth_path = scene_path / "ground_truth.json"
-    if not ground_truth_path.is_file():
-        raise FileNotFoundError(
-            f"No ground_truth_final directory or ground_truth.json under {scene_path}"
-        )
-    with open(ground_truth_path, "r", encoding="utf-8") as stream:
-        document = json.load(stream)
-    if not isinstance(document, Mapping):
-        raise ValueError("AICity ground_truth.json must contain a frame mapping")
-    emitted = 0
-    normalized = sorted(
-        ((_frame_id(frame_id), value) for frame_id, value in document.items()),
-        key=lambda item: item[0],
-    )
-    if len({item[0] for item in normalized}) != len(normalized):
-        raise ValueError("AICity ground_truth.json contains duplicate numeric frame IDs")
-    for current_frame_id, frame_annotations in normalized:
-        if current_frame_id % frame_stride:
-            continue
-        yield {"frame_id": current_frame_id, "annotations": frame_annotations}
-        emitted += 1
-        if max_frames and emitted >= max_frames:
-            return
+    scene_path = Path(scene_dir).expanduser()
+    if not ((scene_path / "ground_truth_final").is_dir() or
+            (scene_path / "ground_truth.json").is_file()):
+        raise FileNotFoundError(f"No ground truth under {scene_path}")
+    for frame_id, frame_annotations in iter_gt_frames(scene_path, frame_stride, max_frames):
+        yield {"frame_id": frame_id, "annotations": frame_annotations}
 
 
 def _scene_camera_names(scene_path: Path, frames: Sequence[Mapping]) -> list[str]:
@@ -616,8 +575,13 @@ def build_rtdetr_archive_sidecar(
                         raw_class_counts.get(source_name, 0) + 1
                     )
                     target_name = resolved_class_map.get(source_name, source_name)
-                    if target_name is None or target_name not in classes:
+                    if target_name is None:
                         continue
+                    if target_name not in classes:
+                        raise ValueError(
+                            f"Unmapped detector class {source_name!r}; add a class_map "
+                            "alias or explicitly map it to null to drop it"
+                        )
                     effective_class_map[source_name] = target_name
                     try:
                         box = [float(parts[index]) for index in range(4, 8)]
