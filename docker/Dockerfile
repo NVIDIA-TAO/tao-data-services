@@ -296,3 +296,29 @@ ARG home=/home/developer
 RUN echo "ALL   ALL = (ALL) NOPASSWD: ALL" > /etc/sudoers \
     && mkdir -p "$(dirname $home)"
 WORKDIR /workspace/
+
+# The vLLM base deletes cuDNN's precompiled engines after installing the package.
+# Restore its exact runtime version last, using NVIDIA's signed APT repository.
+RUN <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cudnn_version="$(dpkg-query -W -f='${Version}' libcudnn9-cuda-13)"
+case "${TARGETARCH}" in
+  amd64) cudnn_repo_arch=x86_64 ;;
+  arm64) cudnn_repo_arch=sbsa ;;
+  *) echo "Unsupported cuDNN architecture: ${TARGETARCH}" >&2; exit 1 ;;
+esac
+test "$(dpkg --print-architecture)" = "${TARGETARCH}"
+curl -fsSL --retry 3 \
+  "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/${cudnn_repo_arch}/cuda-keyring_1.1-1_all.deb" \
+  -o /tmp/tao-cuda-keyring.deb
+dpkg -i /tmp/tao-cuda-keyring.deb
+apt-get update -o APT::Update::Error-Mode=any
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --reinstall \
+    "libcudnn9-cuda-13=${cudnn_version}"
+cudnn_library="$(dpkg-query -L libcudnn9-cuda-13 | grep '/libcudnn_engines_precompiled.so.9$')"
+test -n "${cudnn_library}" && test -s "${cudnn_library}"
+ldconfig
+apt-get clean
+rm -rf /tmp/tao-cuda-keyring.deb /var/lib/apt/lists/*
+EOF
