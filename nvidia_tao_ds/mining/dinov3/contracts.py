@@ -50,6 +50,14 @@ def shard_inventory_digest(shards: list[dict[str, Any]]) -> str:
     return canonical_digest(portable)
 
 
+def shard_content_seal_digest(seals: list[dict[str, Any]]) -> str:
+    """Identify verified shard bytes independently of their local stat binding."""
+    return canonical_digest([
+        {name: seal.get(name) for name in ("relative_path", "bytes", "sha256")}
+        for seal in seals
+    ])
+
+
 _LOCAL_BINDING_FIELDS = frozenset({
     "root_uri",
     "source_root_uri",

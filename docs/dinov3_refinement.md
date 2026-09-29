@@ -66,6 +66,14 @@ require a newly approved run; keep the old directory immutable as evidence.
 Registered stores default to sealed-inventory validation on their declared
 immutable roots; choose `data.source_store_validation: full_sha256` when the
 storage immutability contract is not trusted.
+Registration hashes each shard and emits the content-verification seal used by
+this default; no separate `bind-store-payload` step is required when registering
+with `--source-payload-contract`. Metadata-only registration (`--no-hash-content`)
+does not produce a seal and cannot be used with sealed-inventory validation.
+Seals bind device, inode, mtime and ctime and are local to the registration mount.
+Copying shards or changing the mount can invalidate them even with identical
+bytes. Re-register into a fresh output directory on the destination mount, or
+use `full_sha256` for portable content verification.
 
 Resume verifies all completed training contracts and their checkpoint bytes,
 including historical rounds. Within one execution, the controller and native
@@ -97,16 +105,55 @@ jobs and preserves the existing integration, but no customer runner executable
 is shipped or claimed tested by this change. Generic runner extraction is not
 required for this workflow and is outside the scope of this change.
 
+## Prepare fixed mining embeddings
+
+GRIT scoring/training uses DINOv3, but nearest-neighbor mining uses a separate,
+fixed encoder. C-RADIO is **not required**, and no C-RADIO producer is shipped.
+Use the existing DS CLIP or SigLIP image-embedding producer for both source and
+target images with exactly the same immutable model and processor configuration.
+Keep these embeddings fixed across rounds; do not regenerate them from the
+round's DINOv3 checkpoint. No additional model package/install is needed.
+
+Prepare separate source and target input Parquets. Every row needs a unique
+`filepath` (an absolute local image filename), globally unique `sample_id`,
+`path` equal to `filepath`, and `storage_type: file`. Targets additionally need
+`task` and `role` (`query` or `reference`), including a reference population for
+each query task. Query/reference/source populations must follow your dataset
+split policy. The existing producer preserves these extra columns; duplicate
+filepaths would multiply rows in its metadata join and must be removed first.
+This producer reads individual image files, not tar/zip members; archive-backed
+datasets need an explicitly prepared file view before this step.
+
+Run the shipped producer twice (replace `/data/target-input.parquet` and its
+output with source paths for the source pass):
+
+```bash
+python -m nvidia_tao_ds.mining.embedding.scripts.image_embeddings \
+  input_parquet=/data/target-input.parquet \
+  output_parquet=/data/target-embeddings.parquet \
+  model=CLIP model_path=/models/fixed-clip batch_size=64
+```
+
+`/models/fixed-clip` must be a pre-staged Hugging Face model **and processor**
+snapshot, available in the allocated container. SigLIP is also supported with
+`model=SigLIP` and a matching snapshot. Do not use a moving model revision between
+the two passes. The examples below assume a 224-pixel CLIP processor: use the
+actual resolution and normalization of your processor, and replace `sha256:...`
+with your immutable checkpoint's digest. Record configuration/processor identity
+in the normalization descriptor when it differs. These are operator declarations,
+not facts recoverable from vectors; matching dimensions alone do not establish
+that two encoders are compatible.
+
 ## Register an embedding store
 
 ```bash
 python -m nvidia_tao_ds.mining.dinov3.internal.refinement register-store \
-  --store-root /data/cradiov4/parquet \
-  --output-dir /data/cradiov4/registered \
-  --encoder-name c-radiov4 \
+  --store-root /data/source-embeddings \
+  --output-dir /data/mining-registered \
+  --encoder-name CLIP \
   --encoder-checkpoint-digest sha256:... \
-  --input-resolution 512 \
-  --normalization imagenet \
+  --input-resolution 224 \
+  --normalization clip-default \
   --source-payload-contract /data/source_payload_contract.json
 ```
 
@@ -134,6 +181,35 @@ For example:
 Omitting `--source-payload-contract` remains available for standalone legacy
 uses, but the DINOv3 SSL DEFT workflow requires this provenance binding.
 
+Write the target contract using the encoder identity actually used for the
+target pass, not a different encoder relabeled to match the source:
+
+```bash
+python -m nvidia_tao_ds.mining.dinov3.internal.refinement write-target-contract \
+  --targets /data/target-embeddings.parquet \
+  --source-store-manifest /data/mining-registered/embedding_store.json \
+  --output-dir /data/target-contract \
+  --encoder-name CLIP \
+  --encoder-checkpoint-digest sha256:... \
+  --input-resolution 224 \
+  --normalization clip-default
+```
+
+The writer checks the declared encoder against the registered source, validates
+all target vectors and dimensions, and emits `target_embedding_contract.json`
+with the source inventory binding required by indexed search. It also records
+input digests in `artifact.json` and commits `_SUCCESS`. It does not certify
+the producer's identity or validate task/split semantics. The recorded target
+digest is lineage, not an enforced binding to the workflow's current
+`data.target_manifest`: consumers compare encoder, dimension and source inventory,
+but do not compare this recorded target digest. Vector validation happens when
+the contract is written; regenerate the contract when targets change and approve
+a fresh run. Use a fresh output
+directory for each publication. In `run.yaml`, set `data.target_manifest` to
+the target output Parquet, `data.source_store_manifest` to the registered store,
+and `data.target_embedding_contract` to the generated contract; set the other
+checkpoint, training, payload-contract and output paths, then run `validate`.
+
 ## Select, search, and publish
 
 `select-grit` consumes a model-produced `grit_score`; Data Services does not
@@ -141,7 +217,7 @@ implement the formula. `select-multitask` normalizes weakness within task,
 allocates equal per-task budgets, and deduplicates samples across tasks.
 
 `exact-search` scans every declared embedding shard and applies cumulative
-exclusions plus two independent C-RADIO thresholds. `min_similarity` is the
+exclusions plus two independent cosine-similarity thresholds. `min_similarity` is the
 initial weak-query relevance radius; `duplicate_similarity` rejects near-exact
 copies of the query or any already accepted image. The action retrieves
 `candidate_multiplier * top_k` candidates, allocates them round-robin across
