@@ -4,6 +4,9 @@
 """Standalone package resources and minimal-runtime command checks."""
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -35,12 +38,41 @@ def test_explicit_images_do_not_require_skill_bank():
 
 def test_preflight_checks_all_installed_components(monkeypatch, capsys):
     imports = []
-    monkeypatch.setattr(cli.importlib, "import_module", lambda name: imports.append(name))
+    logger_type = Mock()
+
+    def import_module(name):
+        imports.append(name)
+        return SimpleNamespace(TensorBoardLogger=logger_type)
+
+    monkeypatch.setattr(cli.importlib, "import_module", import_module)
     monkeypatch.setattr(cli.metadata, "version", lambda _: "test")
     assert cli.main(["preflight"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert len(imports) == 4 and imports == result["modules"]
+    assert imports == result["modules"] + ["pytorch_lightning.loggers"]
     assert result["cuda_verified"] is False
+    logger_type.return_value.log_metrics.assert_called_once_with({"preflight": 0.0}, step=0)
+    logger_type.return_value.finalize.assert_called_once_with("success")
+    assert not Path(logger_type.call_args.kwargs["save_dir"]).exists()
+
+
+@pytest.mark.parametrize("failure", ["construct", "write"])
+def test_preflight_rejects_unusable_training_logger(monkeypatch, capsys, failure):
+    logger_type = Mock()
+    error = ModuleNotFoundError("Training logger backend unavailable")
+    if failure == "construct":
+        logger_type.side_effect = error
+    else:
+        logger_type.return_value.log_metrics.side_effect = error
+    monkeypatch.setattr(
+        cli.importlib, "import_module",
+        lambda _: SimpleNamespace(TensorBoardLogger=logger_type),
+    )
+    with pytest.raises(ModuleNotFoundError, match="Training logger backend unavailable"):
+        cli.main(["preflight"])
+    assert capsys.readouterr().out == ""
+    assert not Path(logger_type.call_args.kwargs["save_dir"]).exists()
+    if failure == "write":
+        logger_type.return_value.finalize.assert_called_once_with("success")
 
 
 @pytest.mark.parametrize("command", ["run", "resume"])

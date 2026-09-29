@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import os
@@ -36,6 +37,8 @@ def _experiment_spec(base_spec: str | Path):
     try:
         # Keep non-training DS actions usable without importing the TAO runtime.
         from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig  # pylint: disable=import-outside-toplevel
+        # Use the same resolver registration as native TAO training.
+        importlib.import_module("nvidia_tao_pytorch.core.hydra.hydra_runner")
     except ImportError as error:  # pragma: no cover - production image preflight
         raise RuntimeError(
             "The Data Services container must include the TAO DINOv3 runtime"
@@ -170,6 +173,7 @@ def build_training_spec(
         raise ValueError("DEFT training requires model.distill.enable=false")
 
     spec.results_dir = str(output)
+    spec.train.results_dir = str(output)
     spec.dataset.train_manifest = str(manifest_path)
     spec.train.num_epochs = int(passes)
     spec.train.num_nodes = int(num_nodes)
@@ -287,7 +291,7 @@ def finalize_training(output_dir: str | Path) -> Path:
     commit_path = output / "training_commit.json"
     marker = output / "_SUCCESS"
     if not audit_path.is_file():
-        raise RuntimeError("Native DINOv3 train produced no implementation audit")
+        raise RuntimeError(f"Native DINOv3 train produced no implementation audit: {audit_path}")
     if all(path.is_file() for path in (checkpoint, commit_path, marker)):
         commit = json.loads(commit_path.read_text(encoding="utf-8"))
         expected = {

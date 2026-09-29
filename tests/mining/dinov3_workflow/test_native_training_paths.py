@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Verify DEFT output paths against TAO's real training-directory handling."""
+
+from pathlib import Path
+import re
+
+from omegaconf import OmegaConf
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+import torch
+
+from nvidia_tao_ds.mining.dinov3.workflow.native_actions import (
+    build_training_spec,
+    finalize_training,
+)
+from nvidia_tao_pytorch.core.utilities import update_results_dir
+from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
+from nvidia_tao_pytorch.ssl.dinov3.utils.runtime_spec import publish_runtime_spec
+from nvidia_tao_pytorch.ssl.dinov3.utils.refinement_attestation import publish_native_attestation
+
+
+@pytest.mark.parametrize("train_config", [
+    {},
+    {"results_dir": None},
+    {"results_dir": ""},
+    {"results_dir": "${results_dir}/train"},
+    {"results_dir": "/unrelated/old-training-run"},
+    {"results_dir": "relative-training-run"},
+], ids=["omitted", "null", "empty", "shipped-interpolation", "absolute", "relative"])
+def test_native_training_uses_controller_stage_directory(tmp_path, train_config):
+    """Controller-owned paths must survive native TAO's results-dir rewrite."""
+    base_spec = tmp_path / "base.yaml"
+    OmegaConf.save(OmegaConf.create({
+        "results_dir": "/unrelated/base-run",
+        "dataset": {"batch_size": 1},
+        "train": train_config,
+    }), base_spec)
+    original_spec = base_spec.read_bytes()
+    manifest = tmp_path / "training.parquet"
+    pq.write_table(pa.table({
+        "sample_id": ["sample"], "storage_type": ["file"], "path": ["/data/sample.jpg"],
+    }), manifest)
+    parent = tmp_path / "original.pth"
+    torch.save({"weight": torch.ones(1)}, parent)
+    output = tmp_path / "rounds" / "round_001" / "train"
+
+    spec_path, _, contract = build_training_spec(
+        base_spec=base_spec, manifest=manifest, parent_checkpoint=parent,
+        passes=1, output_dir=output, num_nodes=1, gpus_per_node=1,
+        checkpoint_policy="base_checkpoint_each_round",
+    )
+    spec = OmegaConf.load(spec_path)
+    assert spec.results_dir == spec.train.results_dir == str(output)
+    # This is the actual helper called by DINOv3's monitor_status decorator.
+    update_results_dir(spec, "train")
+    update_results_dir(spec, "train")
+    assert spec.results_dir == spec.train.results_dir == str(output)
+    assert Path(contract["runtime_spec"]) == Path(spec.results_dir) / "experiment.yaml"
+    assert spec.train.pretrained_model_path == str(parent)
+    assert spec.train.auto_resume is False
+    assert base_spec.read_bytes() == original_spec
+    with pytest.raises(RuntimeError, match=re.escape(str(output / "train_implementation_audit.json"))):
+        finalize_training(output)
+
+    @monitor_status(name="DINOv3", mode="train", write_experiment_spec=False)
+    def publish_outputs(config):
+        publish_runtime_spec(config, config.results_dir)
+        publish_native_attestation("train", config.results_dir)
+
+    publish_outputs(spec)
+    for name in ("experiment.yaml", "train_implementation_audit.json", "status.json"):
+        assert (output / name).is_file()
+    assert not (output / "train").exists()
