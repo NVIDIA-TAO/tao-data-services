@@ -23,7 +23,7 @@ import pytest
 import torch
 import yaml
 
-from nvidia_tao_ds.mining.dinov3.contracts import artifact_content_id
+from nvidia_tao_ds.mining.dinov3.contracts import artifact_content_id, shard_content_seal_digest
 
 
 DATA_SERVICES = Path(__file__).resolve().parents[3]
@@ -133,15 +133,15 @@ def test_parquet_reads_disable_background_prefetch(path: Path) -> None:
     """Arrow 23 background read-ahead can abort short-lived leaves on exit."""
     calls = [
         node for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "pd" and node.func.attr == "read_parquet"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and
+        isinstance(node.func.value, ast.Name) and
+        node.func.value.id == "pd" and node.func.attr == "read_parquet"
     ]
     assert calls
     for call in calls:
         assert any(
-            keyword.arg == "pre_buffer" and isinstance(keyword.value, ast.Constant)
-            and keyword.value.value is False for keyword in call.keywords
+            keyword.arg == "pre_buffer" and isinstance(keyword.value, ast.Constant) and
+            keyword.value.value is False for keyword in call.keywords
         ), f"{path}:{call.lineno} must disable asynchronous read-ahead"
 
 
@@ -204,8 +204,7 @@ def _registered_source_payload(
         {
             "relative_path": shard.name,
             "bytes": shard.stat().st_size,
-            "sha256": "sha256:"
-            + hashlib.sha256(shard.read_bytes()).hexdigest(),
+            "sha256": "sha256:" + hashlib.sha256(shard.read_bytes()).hexdigest(),
         }
     ]
     payload = {
@@ -536,7 +535,7 @@ def test_sealed_inventory_requires_and_rechecks_content_seal(
         "content_verification": {
             "algorithm": "sha256_each_shard_with_posix_stat_v1",
             "inventory_digest": canonical_digest([shard_identity]),
-            "shard_seal_digest": canonical_digest([seal]),
+            "shard_seal_digest": shard_content_seal_digest([seal]),
             "shards": [seal],
         },
     }
@@ -550,7 +549,7 @@ def test_sealed_inventory_requires_and_rechecks_content_seal(
     changed_mtime = shard.stat().st_mtime_ns + 2_000_000_000
     os.utime(shard, ns=(shard.stat().st_atime_ns, changed_mtime))
 
-    with pytest.raises(ValueError, match="differs from its content seal"):
+    with pytest.raises(ValueError, match=r"differs from its content seal.*stat.mtime_ns"):
         _verified_embedding_store(
             manifest, content_validation="sealed_inventory"
         )
@@ -921,7 +920,6 @@ def test_native_train_output_paths_cannot_be_overridden(
         WorkflowConfig.from_dict(value)
 
 
-
 def test_training_allocation_graduates_without_dropping_update_floor() -> None:
     training = {
         "passes_per_round": 12,
@@ -1018,8 +1016,7 @@ def test_dynamic_training_allocation_is_recorded_and_passed_to_leaf(
 
     allocation = json.loads(
         (
-            tmp_path
-            / "run/rounds/round_001/train/training_allocation.json"
+            tmp_path / "run/rounds/round_001/train/training_allocation.json"
         ).read_text(encoding="utf-8")
     )
     checkpoint = _fake_training_metadata(
@@ -1139,8 +1136,7 @@ def test_audited_ann_search_is_staged_and_resumable(tmp_path: Path) -> None:
             "duplicate_hash_count": 0,
             "unique": True,
             "collision_policy": "fail_closed_on_blake2b128_collision",
-            "implementation_contract_digest": "sha256:"
-            + "a" * 64,
+            "implementation_contract_digest": "sha256:" + "a" * 64,
             "proof_digest": canonical_digest(
                 {
                     "source_store_artifact_id": source_artifact["artifact_id"],
@@ -1205,8 +1201,7 @@ def test_audited_ann_search_is_staged_and_resumable(tmp_path: Path) -> None:
     assert "round_001/search_candidates" in failed["completed_stages"]
     assert fail_once.is_file()
     candidate_path = (
-        tmp_path
-        / "run/rounds/round_001/search_candidates/ann_candidates.npz"
+        tmp_path / "run/rounds/round_001/search_candidates/ann_candidates.npz"
     )
     candidate_bytes = candidate_path.read_bytes()
     candidate_path.write_bytes(candidate_bytes[:-1] + bytes([candidate_bytes[-1] ^ 1]))
@@ -1348,8 +1343,7 @@ def test_parent_history_materializes_cumulative_manifest(tmp_path: Path) -> None
     assert "parent-source" in set(manifest["sample_id"].astype(str))
     artifact = json.loads(
         (
-            tmp_path
-            / "run/rounds/round_001/materialize/artifact.json"
+            tmp_path / "run/rounds/round_001/materialize/artifact.json"
         ).read_text(encoding="utf-8")
     )
     assert artifact["payload"]["previous_rows"] == 1
@@ -1449,6 +1443,7 @@ def test_sealed_training_continuation_is_adopted_then_evaluated(
     runtime_spec.write_text("runtime: accepted\n", encoding="utf-8")
     prepared_spec = train_dir / "refinement_input.yaml"
     prepared_spec.write_text("prepared: accepted\n", encoding="utf-8")
+
     def digest(path: Path) -> str:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1605,8 +1600,8 @@ def test_sealed_training_continuation_is_adopted_then_evaluated(
     assert "round_002/evaluate" in completed["completed_stages"]
     assert "round_002" in completed["completed_rounds"]
     assert not any(
-        key.startswith("round_002/")
-        and key not in {"round_002/train", "round_002/evaluate"}
+        key.startswith("round_002/") and
+        key not in {"round_002/train", "round_002/evaluate"}
         for key in completed["completed_stages"]
     )
 
@@ -1746,8 +1741,7 @@ def test_continuation_accepts_only_payload_bound_parent_store(
             "manifest": {
                 "uri": unrelated_manifest.resolve().as_uri(),
                 "bytes": len(unrelated_bytes),
-                "sha256": "sha256:"
-                + hashlib.sha256(unrelated_bytes).hexdigest(),
+                "sha256": "sha256:" + hashlib.sha256(unrelated_bytes).hexdigest(),
             },
             "artifact_id": unrelated_artifact["artifact_id"],
             "declared_inventory_digest": unrelated_payload["inventory_digest"],
@@ -1856,7 +1850,7 @@ def test_dense_exact_search_proof_controls_validation_and_stop_reason() -> None:
 
 
 def test_plan_has_no_output_side_effects(tmp_path: Path) -> None:
-    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    RefinementWorkflow(_config(tmp_path, "grit_score"))
     assert not (tmp_path / "run").exists()
 
 
@@ -1942,7 +1936,6 @@ def test_release_lock_covers_builtin_ds_implementations(
     assert workflow_controller._workflow_source_digest().startswith("sha256:")
     assert (DATA_SERVICES / "nvidia_tao_ds/mining/dinov3/materialize.py").resolve() in observed
     assert (WORKFLOW_ROOT / "controller.py").resolve() in observed
-
 
 
 def test_native_lock_covers_dinov3_and_inherited_nvdinov2_runtime(
@@ -2171,6 +2164,7 @@ def test_local_runner_probes_required_gpu_faiss_before_launch(
     with pytest.raises(RuntimeError, match="cannot satisfy required gpu_faiss"):
         runner.run(request)
     assert not (tmp_path / "jobs/gpu-faiss-preflight.json").exists()
+
 
 def test_score_rejects_target_changed_after_request_snapshot(
     tmp_path: Path,
@@ -3021,7 +3015,6 @@ def test_sigterm_handoff_creates_workflow_cancellation_intent(
     assert signal.getsignal(signal.SIGTERM) is previous
 
 
-
 def test_external_runner_verbs_have_bounded_timeout(tmp_path: Path) -> None:
     request = StageRequest(
         client_job_id="timeout",
@@ -3245,8 +3238,9 @@ def test_controller_retains_job_after_mismatched_cancel_acknowledgement(
     assert "round_001/train" in workflow.status()["active_jobs"]
 
 
-@pytest.mark.parametrize("recipe,strategy", [("grit_score", "grit_score"),
-                                            ("multi_task_round_robin", "multi_task_round_robin")])
+@pytest.mark.parametrize("recipe,strategy", [
+    ("grit_score", "grit_score"), ("multi_task_round_robin", "multi_task_round_robin"),
+])
 def test_shipped_recipe_plan_and_all_command_placeholders(tmp_path, recipe, strategy):
     """Exercise both distributed recipes, not just their YAML syntax."""
     value = yaml.safe_load((WORKFLOW_ROOT / "recipes" / f"{recipe}.yaml").read_text())

@@ -20,7 +20,7 @@ model:
 
 data:
   # The score action writes task_scores.parquet with sample_id, task,
-  # weakness_score, and the target's fixed C-RADIO embedding.
+  # weakness_score, and the target's fixed CLIP/SigLIP mining embedding.
   target_manifest: /path/to/adaptive_target_manifest.parquet
   previous_training_manifest: /path/to/parent_training_manifest.parquet
   benchmark_manifest: /path/to/sealed_benchmark_manifest.json
@@ -28,7 +28,7 @@ data:
   acquisition_unit_column: acquisition_unit_id
   # Binds every file/archive locator to an immutable, versioned dataset root.
   source_payload_contract: /path/to/source_payload_contract.json
-  source_store_manifest: /path/to/cradiov4_embedding_store/embedding_store.json
+  source_store_manifest: /path/to/mining_embedding_store/embedding_store.json
   target_embedding_contract: /path/to/target_embedding_contract.json
 
 multi_task:

@@ -20,13 +20,13 @@ model:
 
 data:
   # Query and reference rows contain sample_id, task, role, storage_type,
-  # absolute path/member locators, and the fixed C-RADIO mining embedding.
+  # absolute path/member locators, and a fixed CLIP/SigLIP mining embedding.
   # GRIT observations are recomputed from the current DINOv3 checkpoint.
   target_manifest: /path/to/unlabeled_target_images.parquet
   previous_training_manifest: /path/to/parent_training_manifest.parquet
   # Binds every file/archive locator to an immutable, versioned dataset root.
   source_payload_contract: /path/to/source_payload_contract.json
-  source_store_manifest: /path/to/cradiov4_embedding_store/embedding_store.json
+  source_store_manifest: /path/to/mining_embedding_store/embedding_store.json
   target_embedding_contract: /path/to/target_embedding_contract.json
 
 grit:
