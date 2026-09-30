@@ -18,8 +18,6 @@ from nvidia_tao_ds.mining.dinov3.workflow.native_actions import (
 )
 from nvidia_tao_pytorch.core.utilities import update_results_dir
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
-from nvidia_tao_pytorch.ssl.dinov3.utils.runtime_spec import publish_runtime_spec
-from nvidia_tao_pytorch.ssl.dinov3.utils.refinement_attestation import publish_native_attestation
 
 
 @pytest.mark.parametrize("train_config", [
@@ -32,6 +30,22 @@ from nvidia_tao_pytorch.ssl.dinov3.utils.refinement_attestation import publish_n
 ], ids=["omitted", "null", "empty", "shipped-interpolation", "absolute", "relative"])
 def test_native_training_uses_controller_stage_directory(tmp_path, train_config):
     """Controller-owned paths must survive native TAO's results-dir rewrite."""
+    # The DEFT publish helpers ship with the stacked TAO PyTorch DINOv3 runtime,
+    # which is not present in every CI image. Import them lazily -- a module-level
+    # import would abort collection for the WHOLE suite instead of skipping this
+    # one test. Mirrors the guard in test_workflow.py.
+    try:
+        from nvidia_tao_pytorch.ssl.dinov3.utils.runtime_spec import (
+            publish_runtime_spec,
+        )
+        from nvidia_tao_pytorch.ssl.dinov3.utils.refinement_attestation import (
+            publish_native_attestation,
+        )
+    except ModuleNotFoundError as error:
+        if not (error.name or "").startswith("nvidia_tao_pytorch.ssl.dinov3"):
+            raise
+        pytest.skip("requires the stacked TAO PyTorch DINOv3 DEFT runtime")
+
     base_spec = tmp_path / "base.yaml"
     OmegaConf.save(OmegaConf.create({
         "results_dir": "/unrelated/base-run",
