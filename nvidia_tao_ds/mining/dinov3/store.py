@@ -24,10 +24,21 @@ from .contracts import (
     file_posix_identity,
     file_sha256,
     require_uncommitted_output,
+    shard_content_seal_digest,
     shard_inventory_digest,
     vector_matrix,
 )
 from .materialize import validate_locator_frame
+
+
+def _content_verification(inventory_digest: str, seals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe already-verified shard content and its current local binding."""
+    return {
+        "algorithm": "sha256_each_shard_with_posix_stat_v1",
+        "inventory_digest": inventory_digest,
+        "shard_seal_digest": shard_content_seal_digest(seals),
+        "shards": seals,
+    }
 
 
 def _load_source_payload_contract(
@@ -98,6 +109,62 @@ def _committed_store(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
     if success_path.read_text(encoding="utf-8").strip() != expected_id:
         raise ValueError("Source embedding-store success marker is invalid")
     return payload, artifact
+
+
+def write_target_embedding_contract(
+    *,
+    targets: str | Path,
+    source_store_manifest: str | Path,
+    output_dir: str | Path,
+    encoder: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate target vectors against a declared encoder and registered source."""
+    if any(
+        not isinstance(encoder.get(name), str) or not encoder[name].strip()
+        for name in ("name", "checkpoint_digest", "normalization")
+    ):
+        raise ValueError("Encoder identity fields must be non-empty strings")
+    resolution = encoder.get("input_resolution")
+    if isinstance(resolution, bool) or not isinstance(resolution, int) or resolution <= 0:
+        raise ValueError("Encoder input_resolution must be a positive integer")
+    source_before = file_posix_identity(source_store_manifest)
+    source, _ = _committed_store(source_store_manifest)
+    source_identity = file_identity(source_store_manifest, role="source_store")
+    if file_posix_identity(source_store_manifest) != source_before:
+        raise ValueError("Source changed while writing the embedding contract")
+    if encoder != source.get("encoder"):
+        raise ValueError("Target embedding encoder differs from the source")
+    target_path = Path(targets).resolve()
+    identity_before = file_posix_identity(target_path)
+    parquet = pq.ParquetFile(target_path)
+    if "embedding" not in parquet.schema_arrow.names or not parquet.metadata.num_rows:
+        raise ValueError("Targets require a non-empty embedding column")
+    dimension = source.get("embedding_dim")
+    if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
+        raise ValueError("Source embedding dimension must be a positive integer")
+    for batch in parquet.iter_batches(columns=["embedding"], batch_size=16_384):
+        vectors = vector_matrix(batch.to_pandas()["embedding"], label="Target embedding")
+        if vectors.shape[1] != dimension:
+            raise ValueError("Target embedding dimension differs from the source")
+    target_identity = file_identity(target_path, role="target_embeddings")
+    if file_posix_identity(target_path) != identity_before:
+        raise ValueError("Targets changed while writing the embedding contract")
+    payload = {
+        "encoder": encoder,
+        "embedding_dim": dimension,
+        "source_store_manifest": {"inventory_digest": source["inventory_digest"]},
+    }
+    artifact = ArtifactManifest(
+        artifact_type="target_embedding_contract",
+        producer={"action": "write_target_embedding_contract", "version": "1.0"},
+        inputs=[target_identity, source_identity],
+        payload=payload,
+    )
+    artifact.commit(
+        require_uncommitted_output(output_dir),
+        json_payloads={"target_embedding_contract.json": payload},
+    )
+    return artifact.to_dict()
 
 
 def bind_store_payload_contract(
@@ -242,15 +309,7 @@ def bind_store_payload_contract(
     if locator_count != int(source.get("row_count", -1)):
         raise ValueError("Locator audit row count differs from the store manifest")
     payload = deepcopy(source)
-    payload["content_verification"] = {
-        "algorithm": "sha256_each_shard_with_posix_stat_v1",
-        "inventory_digest": source["inventory_digest"],
-        "shard_seal_digest": canonical_digest([
-            {name: seal[name] for name in ("relative_path", "bytes", "sha256")}
-            for seal in content_seals
-        ]),
-        "shards": content_seals,
-    }
+    payload["content_verification"] = _content_verification(source["inventory_digest"], content_seals)
     payload["source_payload_contract"] = {
         "sha256": contract_identity["sha256"],
         "datasets_digest": canonical_digest(contract["datasets"]),
@@ -451,6 +510,17 @@ def register_embedding_store(
         "fingerprint_method": "sha256" if hash_content else "parquet_inventory_v1",
         "inventory_digest": shard_inventory_digest(shards),
     }
+    if hash_content:
+        payload["content_verification"] = _content_verification(payload["inventory_digest"], [
+            {
+                "relative_path": shard["relative_path"],
+                "bytes": shard["bytes"],
+                "sha256": shard["sha256"],
+                "stat": {name: shard["posix_identity"][name]
+                         for name in ("device", "inode", "mtime_ns", "ctime_ns")},
+            }
+            for shard in shards
+        ])
     inputs = []
     if payload_contract is not None and payload_contract_identity is not None:
         inputs.append(payload_contract_identity)

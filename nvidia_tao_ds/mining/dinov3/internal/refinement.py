@@ -46,7 +46,11 @@ from ..dense_search import exact_dense_search
 from ..materialize import materialize_manifest
 from ..search import exact_sharded_search
 from ..selection import select_grit_targets, select_multitask_targets
-from ..store import bind_store_payload_contract, register_embedding_store
+from ..store import (
+    bind_store_payload_contract,
+    register_embedding_store,
+    write_target_embedding_contract,
+)
 
 
 def _write_selection(
@@ -363,6 +367,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Immutable dataset-version contract for every source locator",
     )
 
+    target_contract = commands.add_parser("write-target-contract")
+    target_contract.add_argument("--targets", required=True)
+    target_contract.add_argument("--source-store-manifest", required=True)
+    target_contract.add_argument("--output-dir", required=True)
+    target_contract.add_argument("--encoder-name", required=True)
+    target_contract.add_argument("--encoder-checkpoint-digest", required=True)
+    target_contract.add_argument("--input-resolution", required=True, type=int)
+    target_contract.add_argument("--normalization", required=True)
+
     bind_store = commands.add_parser("bind-store-payload")
     bind_store.add_argument("--source-store-manifest", required=True)
     bind_store.add_argument("--source-payload-contract", required=True)
@@ -629,6 +642,19 @@ def _run_command(args) -> int:
             hash_content=args.hash_content,
             default_storage_type=args.default_storage_type,
             source_payload_contract=args.source_payload_contract,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "write-target-contract":
+        result = write_target_embedding_contract(
+            targets=args.targets,
+            source_store_manifest=args.source_store_manifest,
+            output_dir=args.output_dir,
+            encoder={
+                "name": args.encoder_name,
+                "checkpoint_digest": args.encoder_checkpoint_digest,
+                "input_resolution": args.input_resolution,
+                "normalization": args.normalization,
+            },
         )
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "bind-store-payload":

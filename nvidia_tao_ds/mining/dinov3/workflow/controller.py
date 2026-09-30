@@ -22,7 +22,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import yaml
 
-from ..contracts import artifact_content_id, atomic_path, write_json_atomic
+from ..contracts import artifact_content_id, atomic_path, shard_content_seal_digest, write_json_atomic
 
 from .config import (
     WorkflowConfig,
@@ -271,9 +271,7 @@ def _verified_embedding_store(
             "sha256_each_shard_with_posix_stat_v1" or
             content_verification.get("inventory_digest") !=
             payload.get("inventory_digest") or
-            not isinstance(content_seals, list) or
-            content_verification.get("shard_seal_digest") !=
-            canonical_digest(content_seals)
+            not isinstance(content_seals, list)
         ):
             raise ValueError(
                 "sealed_inventory requires a valid content-verification seal"
@@ -287,6 +285,8 @@ def _verified_embedding_store(
             sealed_by_path[name] = seal
         if len(sealed_by_path) != len(shards):
             raise ValueError("Content-verification seal does not cover every shard")
+        if content_verification.get("shard_seal_digest") != shard_content_seal_digest(content_seals):
+            raise ValueError("sealed_inventory requires a valid content-verification seal")
     for index, shard in enumerate(shards):
         if not isinstance(shard, dict):
             raise ValueError(f"Embedding shard {index} must be an object")
@@ -346,8 +346,17 @@ def _verified_embedding_store(
                 },
             }
             if seal != observed_seal:
+                differing = [key for key in ("relative_path", "bytes", "sha256")
+                             if seal is None or seal.get(key) != observed_seal[key]]
+                recorded_stat = seal.get("stat") if seal else None
+                if not isinstance(recorded_stat, dict):
+                    recorded_stat = {}
+                differing.extend(f"stat.{key}" for key, value in observed_seal["stat"].items()
+                                 if recorded_stat.get(key) != value)
                 raise ValueError(
-                    f"Embedding shard differs from its content seal: {resolved}"
+                    f"Embedding shard differs from its content seal: {resolved} "
+                    f"(changed: {', '.join(differing)}). Re-register on this mount "
+                    "or use full_sha256 validation."
                 )
         else:
             raise ValueError(
