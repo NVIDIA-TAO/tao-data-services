@@ -3,6 +3,7 @@
 
 """Check shipped-spec composition without resolver state leaking between tests."""
 
+import functools
 import subprocess
 import sys
 import textwrap
@@ -10,10 +11,69 @@ import textwrap
 import pytest
 
 
+# ``build_grit_spec`` / ``build_training_spec`` compose over the *installed* TAO
+# DINOv3 structured schema (``native_actions._experiment_spec``), so they can only
+# be exercised against the stacked DEFT runtime that ships in the Data Services
+# container. An older ``nvidia_tao_pytorch.ssl.dinov3`` still imports cleanly but
+# its ``ExperimentConfig`` has no ``grit_score`` section and no
+# ``dataset.train_manifest`` field, which makes OmegaConf struct mode raise
+# ``ConfigAttributeError``. A plain ImportError guard therefore does not catch it —
+# probe the schema itself. The probe runs in a throwaway subprocess so importing
+# TAO never registers the ``eval`` resolver in the pytest process, which would
+# defeat the very resolver-isolation assertions this module makes.
+_DEFT_SCHEMA_PROBE = textwrap.dedent('''
+    import sys
+
+    from omegaconf import OmegaConf
+
+    try:
+        from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig
+        import nvidia_tao_pytorch.ssl.dinov3  # noqa: F401
+    except Exception as error:  # pragma: no cover - environment probe
+        print(f"TAO DINOv3 runtime unavailable: {error}")
+        sys.exit(1)
+
+    # Compare against a plain dict: `in` on a struct-mode DictConfig has subtle
+    # semantics, and this probe must never report "absent" for a good runtime.
+    schema = OmegaConf.to_container(
+        OmegaConf.structured(ExperimentConfig()), resolve=False, throw_on_missing=False,
+    )
+    dataset = schema.get("dataset") if isinstance(schema, dict) else None
+    missing = []
+    if not isinstance(schema, dict) or "grit_score" not in schema:
+        missing.append("grit_score")
+    if not isinstance(dataset, dict) or "train_manifest" not in dataset:
+        missing.append("dataset.train_manifest")
+    if missing:
+        print("ExperimentConfig has no " + ", ".join(missing))
+        sys.exit(1)
+''')
+
+
+@functools.lru_cache(maxsize=1)
+def _deft_schema_unavailable_reason() -> str:
+    """Return why the installed DINOv3 schema cannot compose DEFT specs, else ``""``."""
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", _DEFT_SCHEMA_PROBE],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:  # pragma: no cover - environment probe
+        return "DINOv3 schema probe timed out"
+    if probe.returncode == 0:
+        return ""
+    return (probe.stdout + probe.stderr).strip() or "DINOv3 schema probe failed"
+
+
 @pytest.mark.parametrize("import_order", ["controller-first", "tao-first"])
 @pytest.mark.parametrize("first_action", ["score", "train"])
 def test_shipped_spec_resolvers_in_fresh_process(tmp_path, import_order, first_action):
     """Both native actions must resolve shipped learning rates in either order."""
+    reason = _deft_schema_unavailable_reason()
+    if reason:
+        pytest.skip(
+            f"requires the stacked TAO PyTorch DINOv3 DEFT runtime ({reason})"
+        )
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent('''
             import importlib
