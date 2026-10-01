@@ -124,6 +124,45 @@ check (`ci/run_static_tests.py`) verifies those digest references stay in sync.
 
 ## Sparse4D Data Preparation
 
+### Calibrated scenes without 3D annotations
+
+Use `annotations convert` with the
+[unlabeled-scene spec](nvidia_tao_ds/annotations/experiment_specs/aicity2ovpkl_unlabeled.yaml)
+to create Sparse4D info PKLs from images and NVSchema camera calibration. Copy
+that spec to `/specs/aicity2ovpkl_unlabeled.yaml` and set the ordered
+`aicity.class_config.CLASS_LIST` to match the training model and teacher cache.
+
+```sh
+annotations convert -e /specs/aicity2ovpkl_unlabeled.yaml \
+  aicity.root=/data/real aicity.split=train aicity.fps=30 \
+  results_dir=/data/real_infos
+```
+
+The input layout is `/data/real/train/<scene>/calibration.json` plus
+`<camera>/rgb/000000000.jpg`, `000000001.jpg`, and so on. The existing
+`rgb_00000.jpg` naming convention also works. Camera names must match calibration
+IDs. Use synchronized, constant-rate frames, contiguous from zero, and provide
+the actual capture rate in `aicity.fps`. The converter rejects empty, gapped,
+or unequal camera sequences. Irregular timestamps and dropped-frame input
+must be synchronized before conversion; run the 2D teacher on those same frames.
+For HDF5 images, use `aicity.rgb_format=h5` and `<camera>.h5` files with
+`rgb/rgb_00000.jpg` datasets containing HWC image arrays.
+
+`aicity.load_annotations=false` skips ground-truth and depth loading, writes
+`gt_boxes=None`, omits depth paths, and skips anchor initialization even when
+its configured anchor count is positive. Existing anchor files are preserved;
+reuse the pretrained model's anchors. The default labeled converter retains
+`load_annotations=true`. `fps` also controls labeled object velocity calculation.
+
+The unlabeled spec keeps the world frame and uses all calibrated cameras as one
+group per scene. It writes `/data/real_infos/train/<scene>_infos_train.pkl`.
+The existing camera-grouping options remain available for generating multiple
+BEV groups. Keep the same container-visible image paths during training.
+Generate the matching 2D caches with `rtdetr_2d`, put each real and 3D-labeled
+PKL once in the mixed training split, and build the lazy index as described below.
+
+### Supervision caches and lazy indexing
+
 `annotations sparse4d_prepare` creates the versioned artifacts consumed by
 TAO Sparse4D. Locate the installed package's spec and select one operation
 (no source checkout required). The `annotations` launcher requires `-e`, even

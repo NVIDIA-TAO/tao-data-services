@@ -75,3 +75,10 @@ tao_ds --gpus all --volume "$PWD:/workspace" -- annotations convert -e nvidia_ta
 For standard entrypoints, command-line Hydra overrides follow the experiment
 spec. For mining and RCCA direct dispatchers, pass Hydra args directly to the
 subtask script through the dispatcher.
+
+The AICity conversion tests include an optional TAO PyTorch integration check.
+With a compatible TAO PyTorch checkout on `PYTHONPATH`, the generated unlabeled
+JPEG/HDF5 PKLs, Data Services lazy index, and RT-DETR caches are passed through
+the real Sparse4D dataset, image/depth transforms, and cache loader. Minimal
+Data Services environments without TAO PyTorch skip those two integration
+cases; the standalone conversion and CLI tests still run.

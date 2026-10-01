@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 data:
   input_format: "AICity"
   output_format: "OVPKL"
@@ -32,6 +35,8 @@ aicity:
   depth_format: "h5"
   camera_grouping_mode: "random"
   num_frames: -1
+  load_annotations: true  # Set false for calibrated scenes without 3D GT or depth.
+  fps: 30.0  # Actual capture rate of synchronized, contiguous frames.
   anchor_init_config:
     num_anchor: 900
     detection_range: -1

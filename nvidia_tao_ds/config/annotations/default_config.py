@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Default config file."""
@@ -118,6 +118,14 @@ class AICityConfig:
     camera_grouping_mode: str = STR_FIELD(value=MISSING, default_value="random")
     anchor_init_config: AnchorInitConfig = DATACLASS_FIELD(AnchorInitConfig())
     num_frames: int = INT_FIELD(value=9000, default_value=9000)
+    load_annotations: bool = BOOL_FIELD(
+        value=True, default_value=True,
+        description="Load 3D ground truth and depth; disable for calibrated unlabeled scenes.",
+    )
+    fps: float = FLOAT_FIELD(
+        value=30.0, default_value=30.0,
+        description="Positive capture frame rate for synchronized, contiguous frames.",
+    )
 
 
 @dataclass
