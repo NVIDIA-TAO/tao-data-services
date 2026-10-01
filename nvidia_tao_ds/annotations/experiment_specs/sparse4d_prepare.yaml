@@ -1,0 +1,93 @@
+# Sparse4D data preparation. Only the block selected by operation is consumed.
+operation: lazy_index
+overwrite: false
+
+# Keep this order identical to dataset.classes in the training runtime and the
+# training dataset taxonomy. Artifact readers intentionally reject reordering.
+class_names:
+  - person
+  - gr1_t2
+  - agility_digit
+  - nova_carter
+subclass_map:
+  person:
+    - Person
+    - Human
+  gr1_t2:
+    - FourierGR1T2
+    - Fourier_GR1_T2_Humanoid
+  agility_digit:
+    - AgilityDigit
+    - Agility_Digit_Humanoid
+  nova_carter:
+    - NovaCarter
+    - Nova_Carter
+
+lazy_index:
+  annotation_source: ???
+  force: false
+  workers: 0
+  write_camera_counts: true
+  camera_counts_path: ""
+
+ltt_2dgt:
+  selection:
+    data_root: ""
+    scenes: []
+    scenes_file: ""
+    scene_dirs: []
+    train_split: ""
+    dedup_regex: '^CT[\w.]+?__'
+  annotation_version: v0.1
+  output_dir: ""
+  frame_stride: 1
+  max_frames_per_scene: 0
+  drop_names:
+    - pallet
+
+ltt_data:
+  selection:
+    data_root: ""
+    scenes: []
+    scenes_file: ""
+    scene_dirs: []
+    train_split: ""
+    dedup_regex: '^CT[\w.]+?__'
+  output_path: ""
+  calibration_mode: aic25
+  calibration_file: ""
+  annotation_version: v0.1
+  frame_stride: 10
+  max_frames_per_scene: 0
+  min_visibility: 0.0
+  max_per_class: 50000
+  image_width: 0
+  image_height: 0
+  seed: 0
+
+rtdetr_2d:
+  input_dir: ""
+  output_path: ""
+  scene_name: ""
+  camera_map: {}
+  class_map: {}
+  confidence_threshold: 0.4
+  frame_stride: 1
+  max_frames_per_camera: 0
+
+sv2d:
+  manifest_path: ""
+  cache_dir: ""
+  pkl_dir: ""
+  dataset: all
+  split_output: ""
+  suffix: ""
+  max_images: 0
+  keep_empty: false
+  canonical_width: 1920
+  canonical_height: 1080
+  drop_names:
+    - pallet
+  class_map: {}
+
+results_dir: ???
