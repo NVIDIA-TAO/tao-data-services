@@ -105,7 +105,7 @@ subtasks are discovered from each command package's `scripts/` directory.
 | Command | Python entry point | Script subtasks |
 | :--- | :--- | :--- |
 | `analytics` | `nvidia_tao_ds.data_analytics.entrypoint.analytics:main` | `analyze`<br>`kpi_analyze`<br>`validate` |
-| `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice` |
+| `annotations` | `nvidia_tao_ds.annotations.entrypoint.annotations:main` | `convert`<br>`merge`<br>`qa_to_llava_annotation`<br>`slice`<br>`sparse4d_prepare` |
 | `augmentation` | `nvidia_tao_ds.augmentation.entrypoint.augment:main` | `generate` |
 | `auto_label` | `nvidia_tao_ds.auto_label.entrypoint.auto_label:main` | `generate` |
 | `embedding` | `nvidia_tao_ds.mining.embedding.entrypoint.embedding:main` | `image_embeddings`<br>`text_embeddings` |
@@ -121,6 +121,70 @@ digest for the host. The pinned digests are intentionally not duplicated here â€
 live in `docker/manifest.json` (and the CI / Jenkins / release files), and a static CI
 check (`ci/run_static_tests.py`) verifies those digest references stay in sync.
 <!-- END GENERATED: supported-commands -->
+
+## Sparse4D Data Preparation
+
+`annotations sparse4d_prepare` creates the versioned artifacts consumed by
+TAO Sparse4D. Locate the installed package's spec and select one operation
+(no source checkout required). The `annotations` launcher requires `-e`, even
+though the underlying Hydra script has a default:
+
+```sh
+sparse4d_spec=$(python -c 'from importlib.resources import files; print(files("nvidia_tao_ds.annotations").joinpath("experiment_specs/sparse4d_prepare.yaml"))')
+annotations sparse4d_prepare \
+  -e "$sparse4d_spec" \
+  operation=lazy_index \
+  lazy_index.annotation_source=/data/annotations/train.txt \
+  results_dir=/results/sparse4d_prepare
+```
+
+The supported operations are:
+
+- `lazy_index`: build the trusted-pickle frame index and camera-count cache.
+- `ltt_2dgt`: create per-scene `ltt_2dgt/v1` visible-box sidecars.
+- `ltt_data`: extract a grouped `ltt_data/v2` Loose-to-Tight training cache.
+- `rtdetr_2d`: normalize archived KITTI RT-DETR labels to
+  `ltt_rtdetr2d/v1`.
+- `sv2d`: create calibration-free Sparse4D PKLs and paired 2D caches from a
+  COCO manifest.
+
+Keep `class_names` identical, including order, to the TAO
+`dataset.classes` setting. For `sv2d`, enable
+`dataset.resize_to_canonical_2d` in TAO and use the same canonical height and
+width; the runtime rejects mismatched cache/image dimensions. Generated PKLs
+and lazy indexes contain absolute paths, so retain the same dataset mount paths
+between preparation and training or rebuild them after relocation. Lazy-index
+split rows are relative to the process working directory, matching the training
+runtime, not relative to the split file. Symlinked mount paths are preserved.
+Prefer absolute container-visible paths in split files. Duplicate PKL rows are
+rejected; use the sampler's weighting configuration instead.
+
+All operations default to `overwrite=false`. Existing outputs are checked
+before writing the operation's artifacts, including SV2D split/weight files
+and lazy-index camera counts. Set the top-level `overwrite=true` to opt in to
+replacement (this replaces the earlier `ltt_2dgt.overwrite` option). Successful
+CLI jobs atomically save `results_dir/sparse4d_prepare_summary.json`, containing
+the returned artifact paths and counts. Use a new results directory for each
+job, or explicitly enable overwrite when rerunning.
+
+RT-DETR labels outside `class_names` must have an explicit alias in
+`rtdetr_2d.class_map`, or map to `null` to be intentionally dropped. Unknown
+labels fail instead of silently creating valid background frames. For example,
+`{Human: person, pallet: null}` retains people and deliberately excludes pallets.
+Scene names must not contain `+`, the runtime's reserved BEV-group separator.
+
+LTT geometry requires separate camera intrinsics and rigid world-to-camera
+extrinsics. Projection-only `cameraMatrix` calibration is rejected for
+`ltt_data`; visible-box-only `ltt_2dgt` does not require metric camera geometry.
+Both LTT producers use the same frame iterator: numeric ordering for per-frame
+files, source ordering for monolithic JSON, ignored nonnumeric metadata keys,
+and rejected duplicate normalized frame IDs. Optional streaming JSON support
+does not change the selected frame subset.
+
+The AICity converter supports the camera-discovery import layouts in
+`spatialai_data_utils` 1.x and 2.x. Tests exercise the installed implementation
+with actual directories and HDF5 files; this change does not upgrade the
+data-service image's pinned dependency.
 
 ## Container Builds
 
