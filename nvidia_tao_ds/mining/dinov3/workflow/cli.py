@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import shutil
 import signal
+import tempfile
 
 
 from . import RefinementWorkflow, WorkflowConfig
@@ -111,6 +112,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         for module in modules:
             importlib.import_module(module)
+        logger_type = importlib.import_module("pytorch_lightning.loggers").TensorBoardLogger
+        with tempfile.TemporaryDirectory(prefix="deft-preflight-") as log_dir:
+            logger = logger_type(save_dir=log_dir)
+            try:
+                logger.log_metrics({"preflight": 0.0}, step=0)
+            finally:
+                logger.finalize("success")
+            if not any(path.is_file() and path.stat().st_size > 0
+                       for path in Path(log_dir).rglob("events.out.tfevents.*")):
+                raise RuntimeError(
+                    "TensorBoard preflight produced no nonempty event file; "
+                    "run preflight from the rank-zero controller environment"
+                )
         if args.gpu:
             torch = importlib.import_module("torch")
             if not torch.cuda.is_available():
