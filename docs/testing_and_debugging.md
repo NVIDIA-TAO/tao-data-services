@@ -44,6 +44,7 @@ the normal blast radius for documentation-only changes.
 | Annotation merge/slice | `pytest tests/test_merger_slicer.py -q` |
 | COCO/KITTI conversion | `pytest tests/test_coco_kitti_conversion.py tests/test_coco_odvg_conversion.py -q` |
 | AICity conversion | `pytest tests/test_aicity_ovpkl_conversion.py -q` |
+| SDU base-image upgrade | `pytest tests/test_sdu_runtime.py tests/test_aicity_ovpkl_conversion.py tests/test_sparse4d_*.py -q` |
 | QA to LLaVA conversion | `pytest tests/test_qa_to_llava_annotation.py tests/test_llava_merger.py -q` |
 | Analytics | `pytest tests/test_data_analytics.py -q` |
 | Auto-label prompt and parsing logic | `pytest tests/autolabel -q` |
@@ -51,6 +52,16 @@ the normal blast radius for documentation-only changes.
 
 `ci/run_functional_tests.py` runs `pytest tests -v --color=yes`. Use it when a
 change spans multiple domains and the environment has the needed dependencies.
+
+The SDU runtime test requires the installed distribution to match the exact pin
+in `docker/requirements-pip.txt`. It intentionally fails on an old base image,
+even if the legacy SDU API still passes conversion tests. Rebuild and validate
+each supported architecture, then update both `docker/manifest.json` and
+`release/docker/Dockerfile.release` to the published image digests. The Dockerfile
+installs SDU separately with `--no-deps` to preserve the curated TAO package set;
+passing API tests does not imply that SDU's declared dependency constraints are
+all satisfied. Retain the package inventory and dependency-check output for
+Infra review.
 
 ## Common Failures
 
@@ -75,3 +86,10 @@ tao_ds --gpus all --volume "$PWD:/workspace" -- annotations convert -e nvidia_ta
 For standard entrypoints, command-line Hydra overrides follow the experiment
 spec. For mining and RCCA direct dispatchers, pass Hydra args directly to the
 subtask script through the dispatcher.
+
+The AICity conversion tests include an optional TAO PyTorch integration check.
+With a compatible TAO PyTorch checkout on `PYTHONPATH`, the generated unlabeled
+JPEG/HDF5 PKLs, Data Services lazy index, and RT-DETR caches are passed through
+the real Sparse4D dataset, image/depth transforms, and cache loader. Minimal
+Data Services environments without TAO PyTorch skip those two integration
+cases; the standalone conversion and CLI tests still run.

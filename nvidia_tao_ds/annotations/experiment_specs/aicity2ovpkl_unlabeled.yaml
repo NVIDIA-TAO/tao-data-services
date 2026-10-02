@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data:
+  input_format: AICity
+  output_format: OVPKL
+aicity:
+  root: ???  # Contains train/<scene>/calibration.json and per-camera images.
+  version: "2025"
+  split: train
+  load_annotations: false  # No ground_truth.json or depth required; anchors are reused.
+  fps: 30.0  # Actual capture rate of synchronized, contiguous frames starting at zero.
+  rgb_format: jpg  # Set h5 for HDF5 image arrays.
+  depth_format: h5  # Ignored when load_annotations is false.
+  camera_grouping_mode: ""  # Use all calibrated cameras as one group per scene.
+  recentering: false
+  num_frames: -1
+  class_config:
+    CLASS_LIST: [person, gr1_t2, agility_digit, nova_carter, transporter, forklift, pallet_truck]
+    SUB_CLASS_DICT: {}
+results_dir: ???
