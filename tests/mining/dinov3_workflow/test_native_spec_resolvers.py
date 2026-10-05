@@ -129,7 +129,7 @@ def test_shipped_spec_resolvers_in_fresh_process(
                 check_score()
 
             for nodes, gpus in ((1, 1), (2, 2)):
-                spec_path, _, _ = build_training_spec(
+                spec_path, _, _, _ = build_training_spec(
                     base_spec=base, manifest=manifest, parent_checkpoint=checkpoint,
                     passes=1, output_dir=root / f"train-{nodes}-{gpus}",
                     num_nodes=nodes, gpus_per_node=gpus,

@@ -152,8 +152,8 @@ def build_training_spec(
     num_nodes: int,
     gpus_per_node: int,
     checkpoint_policy: str,
-) -> tuple[Path, Path, dict[str, Any]]:
-    """Write one native DINOv3 train spec while preserving scheduler policy."""
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any] | None]:
+    """Write a native train spec and return its contract and optional schedule warning."""
     if passes <= 0 or num_nodes <= 0 or gpus_per_node <= 0:
         raise ValueError("passes, num_nodes, and gpus_per_node must be positive")
     base_path, spec = _experiment_spec(base_spec)
@@ -188,6 +188,35 @@ def build_training_spec(
     world_size = num_nodes * gpus_per_node
     steps_per_pass = math.ceil(math.ceil(rows / world_size) / batch_size)
     total_steps = steps_per_pass * passes
+    schedule_coverage = {}
+    for name, field in (
+        ("learning_rate", "warm_up_steps"),
+        ("last_layer_learning_rate", "warm_up_steps"),
+        ("last_layer_learning_rate", "freeze_steps"),
+    ):
+        steps = int(spec.train.schedulers[name][field])
+        schedule_coverage[f"train.schedulers.{name}.{field}"] = {
+            "configured_steps": steps,
+            "covered_fraction": min(steps, total_steps) / total_steps,
+        }
+    schedule_warning = None
+    if any(item["configured_steps"] >= total_steps for item in schedule_coverage.values()):
+        details = "; ".join(
+            f"{key}={item['configured_steps']} covers {item['covered_fraction']:.1%} of the round"
+            for key, item in schedule_coverage.items()
+        )
+        message = (
+            f"DINOv3 DEFT training round {output}: total_optimizer_steps={total_steps}; "
+            f"{details}. At least one warm-up or last-layer freeze covers the entire round. "
+            "Scheduler settings are preserved. Review training.base_spec or increase "
+            "training.passes_per_round before running; each candidate restarts from the original checkpoint."
+        )
+        schedule_warning = {
+            "message": message,
+            "total_optimizer_steps": total_steps,
+            "schedule_coverage": schedule_coverage,
+        }
+        warnings.warn(message, UserWarning, stacklevel=2)
     spec_path = _write_yaml_atomic(output / "refinement_input.yaml", spec)
     contract = {
         "schema_version": "1.0",
@@ -229,9 +258,9 @@ def build_training_spec(
                 "Prepared DINOv3 training request conflicts with existing contract: "
                 f"{json.dumps(changed, sort_keys=True)}"
             )
-        return spec_path, contract_path, existing
+        return spec_path, contract_path, existing, schedule_warning
     write_json_atomic(contract_path, contract)
-    return spec_path, contract_path, contract
+    return spec_path, contract_path, contract, schedule_warning
 
 
 def _atomic_publish_checkpoint(source: Path, destination: Path) -> str:
