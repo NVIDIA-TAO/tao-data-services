@@ -409,12 +409,44 @@ def test_public_converter_still_requires_gt_by_default(tmp_path):
 
 
 @pytest.mark.parametrize("fps", [0, -1, float("nan"), float("inf")])
-def test_converter_rejects_invalid_capture_rate(tmp_path, fps):
-    """Reject invalid timestamps before publishing any scene PKL."""
+def test_converter_rejects_invalid_capture_rate(tmp_path, monkeypatch, fps):
+    """Reject invalid timestamps before decoding videos or creating outputs."""
     cfg, _ = _unlabeled_config(tmp_path)
     cfg.aicity.fps = fps
+    cfg.aicity.rgb_format = "mp4"
+    decode = mock.Mock(side_effect=AssertionError("must validate before decoding"))
+    monkeypatch.setattr(aicity_to_ovpkl, "video_to_frame", decode)
     with pytest.raises(ValueError, match="fps must be finite and positive"):
         aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    decode.assert_not_called()
+    assert not os.path.exists(cfg.results_dir)
+
+
+@pytest.mark.parametrize("num_frames", [0, -2])
+def test_converter_rejects_invalid_frame_limit(tmp_path, monkeypatch, num_frames):
+    """An invalid frame limit must not start an expensive MP4 conversion."""
+    cfg, _ = _unlabeled_config(tmp_path)
+    cfg.aicity.num_frames = num_frames
+    cfg.aicity.rgb_format = "mp4"
+    decode = mock.Mock(side_effect=AssertionError("must validate before decoding"))
+    monkeypatch.setattr(aicity_to_ovpkl, "video_to_frame", decode)
+    with pytest.raises(ValueError, match="num_frames must be -1 or positive"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    decode.assert_not_called()
+    assert not os.path.exists(cfg.results_dir)
+
+
+@pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
+def test_unlabeled_conversion_reports_missing_camera_storage(tmp_path, rgb_format):
+    """Identify the calibration camera and expected path for missing images."""
+    cfg, scene = _unlabeled_config(tmp_path, rgb_format)
+    missing = scene / ("Camera2.h5" if rgb_format == "h5" else "Camera2/rgb")
+    missing.rename(missing.with_name(missing.name + ".unavailable"))
+    with pytest.raises(FileNotFoundError, match="Calibration camera Camera2: expected RGB") as error:
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    assert str(missing) in str(error.value)
+    if rgb_format == "h5":
+        assert str(scene / "Camera2.hdf5") in str(error.value)
     assert not list(tmp_path.rglob("*.pkl"))
 
 
@@ -437,17 +469,17 @@ def test_velocity_uses_configured_frame_rate():
 
 
 @pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
-def test_unlabeled_artifacts_load_in_tao_pytorch(tmp_path, rgb_format):
+def test_unlabeled_artifacts_load_in_tao_pytorch(tmp_path, rgb_format, sparse4d_runtime):
     """Exercise real DS PKLs, lazy index, KITTI cache, image/depth and TAO joins.
 
     Run with the companion TAO PyTorch checkout on PYTHONPATH. Minimal Data
-    Services images without that optional consumer skip this integration test.
+    Services images without co-training support skip this integration test;
+    --require-sparse4d-runtime makes missing capabilities a hard failure.
     """
     import io
     from pathlib import Path
     import tarfile
-    dataset_module = pytest.importorskip("nvidia_tao_pytorch.cv.sparse4d.dataloader.dataset")
-    transforms = pytest.importorskip("nvidia_tao_pytorch.cv.sparse4d.dataloader.transforms")
+    dataset_module, transforms = sparse4d_runtime
     from nvidia_tao_ds.annotations.sparse4d.lazy_index import build_lazy_index
     from nvidia_tao_ds.annotations.sparse4d.sidecars import build_rtdetr_archive_sidecar
 

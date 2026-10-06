@@ -105,13 +105,19 @@ def _unlabeled_camera_frames(scene_path, camera_names, rgb_format):
     for camera in sorted(camera_names):
         if rgb_format == "h5":
             storage_name = _find_h5_filename(scene_path, camera)
-            with h5py.File(os.path.join(scene_path, storage_name), "r") as stream:
+            image_path = os.path.join(scene_path, storage_name)
+            if not os.path.isfile(image_path):
+                candidates = ", ".join(os.path.join(scene_path, camera + suffix) for suffix in _H5_SUFFIXES)
+                raise FileNotFoundError(f"Calibration camera {camera}: expected RGB storage at {candidates}")
+            with h5py.File(image_path, "r") as stream:
                 frames = set(stream["rgb"].keys())
             expected = {f"rgb_{frame_id:05}.jpg" for frame_id in range(len(frames))}
             valid = frames == expected
         else:
             storage_name = camera
             image_dir = os.path.join(scene_path, camera, "rgb")
+            if not os.path.isdir(image_dir):
+                raise FileNotFoundError(f"Calibration camera {camera}: expected RGB directory at {image_dir}")
             frames = {
                 name for name in os.listdir(image_dir)
                 if name.endswith(f".{rgb_format}") and os.path.isfile(os.path.join(image_dir, name))
@@ -139,6 +145,14 @@ def _is_annotation_pkl(filename):
         filename not in _GENERATED_ANNOTATION_CACHE_FILENAMES and
         not filename.endswith("_lazy_index.pkl")
     )
+
+
+def _validate_frame_timing(fps, num_frames):
+    """Reject invalid capture timing before decoding videos or writing outputs."""
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError("aicity.fps must be finite and positive")
+    if num_frames != -1 and num_frames <= 0:
+        raise ValueError("aicity.num_frames must be -1 or positive")
 
 
 def convert_aicity_to_ovpkl(
@@ -169,6 +183,7 @@ def convert_aicity_to_ovpkl(
     else:
         raise ValueError("config is not provided")
 
+    _validate_frame_timing(fps, num_frames)
     if not os.path.isdir(root_path):
         raise FileNotFoundError(f"Root path {root_path} does not exist")
 
@@ -381,10 +396,7 @@ def create_ov_infos_aicity2025(
         load_anno (bool): Load ground truth and depth; False emits unlabeled frames.
         fps (float): Capture rate of synchronized, contiguous frames.
     """
-    if not np.isfinite(fps) or fps <= 0:
-        raise ValueError("aicity.fps must be finite and positive")
-    if num_frames != -1 and num_frames <= 0:
-        raise ValueError("aicity.num_frames must be -1 or positive")
+    _validate_frame_timing(fps, num_frames)
     split_root_path = os.path.join(root_path, split)
     scene_names = sorted(
         name for name in os.listdir(split_root_path)
