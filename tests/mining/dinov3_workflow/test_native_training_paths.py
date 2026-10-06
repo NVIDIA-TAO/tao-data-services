@@ -70,7 +70,7 @@ def test_native_training_uses_controller_stage_directory(tmp_path, train_config,
     torch.save({"weight": torch.ones(1)}, parent)
     output = tmp_path / "rounds" / "round_001" / "train"
 
-    spec_path, _, contract = build_training_spec(
+    spec_path, _, contract, _ = build_training_spec(
         base_spec=base_spec, manifest=manifest, parent_checkpoint=parent,
         passes=1, output_dir=output, num_nodes=1, gpus_per_node=1,
         checkpoint_policy="base_checkpoint_each_round",

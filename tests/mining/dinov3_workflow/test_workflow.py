@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 
 from omegaconf import OmegaConf
 import pandas as pd
@@ -92,6 +93,7 @@ def _compatible_native_config(monkeypatch: pytest.MonkeyPatch):
                 "auto_resume": False,
                 "checkpoint_interval": 1,
                 "checkpoint_interval_unit": "epoch",
+                "schedulers": OmegaConf.to_container(installed.train.schedulers),
             },
             "grit_score": {
                 "results_dir": None,
@@ -882,6 +884,71 @@ def test_every_round_trains_from_immutable_base_checkpoint(
     assert state["current_checkpoint"].endswith(
         "rounds/round_002/train/checkpoint.pth"
     )
+
+
+@pytest.mark.parametrize("short_schedule", [False, True])
+def test_schedule_warning_is_durable_before_each_training_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_schedule: bool,
+) -> None:
+    """Bug verification must find round warnings in events even with stderr suppressed."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    base_spec = Path(value["training"]["base_spec"])
+    spec = OmegaConf.load(base_spec)
+    spec.dataset.batch_size = 16
+    spec.train = {"schedulers": {
+        "learning_rate": {"warm_up_steps": 20 if short_schedule else 10000},
+        "last_layer_learning_rate": {
+            "warm_up_steps": 20 if short_schedule else 10000,
+            "freeze_steps": 0 if short_schedule else 1250,
+        },
+    }}
+    OmegaConf.save(spec, base_spec)
+    original_spec = base_spec.read_bytes()
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    state = workflow._initialize()  # pylint: disable=protected-access
+    events_path = tmp_path / "run/events.jsonl"
+    native_run = workflow.runner.run
+    launched = []
+
+    def run_with_persisted_warning(request):
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        diagnostics = [event for event in events if event["status"] == "schedule_warning"]
+        assert len(diagnostics) == (0 if short_schedule else request.round_index)
+        if diagnostics:
+            diagnostic = diagnostics[-1]
+            assert diagnostic["round"] == request.round_index
+            assert diagnostic["stage"] == "train"
+            assert diagnostic["run_id"] == state["run_id"]
+            assert diagnostic["total_optimizer_steps"] == 96 * request.round_index
+            freeze = diagnostic["schedule_coverage"][
+                "train.schedulers.last_layer_learning_rate.freeze_steps"
+            ]
+            assert freeze == {"configured_steps": 1250, "covered_fraction": 1.0}
+            assert "warm-up" in diagnostic["message"]
+        launched.append(request.round_index)
+        return native_run(request)
+
+    monkeypatch.setattr(workflow.runner, "run", run_with_persisted_warning)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        for round_index, rows in ((1, 768), (2, 1536)):
+            manifest = tmp_path / f"training-{round_index}.parquet"
+            pd.DataFrame({
+                "sample_id": [f"s{i}" for i in range(rows)],
+                "storage_type": ["file"] * rows,
+                "path": [f"/data/{i}.jpg" for i in range(rows)],
+            }).to_parquet(manifest, index=False)
+            checkpoint = workflow._train(  # pylint: disable=protected-access
+                state, round_index, tmp_path / f"run/rounds/round_{round_index:03d}", manifest,
+            )
+            assert _fake_training_metadata(checkpoint)["parent"] == value["model"]["base_checkpoint"]
+    assert launched == [1, 2]
+    assert base_spec.read_bytes() == original_spec
+    # This matches the bug report's durable-log check, not captured Python warnings.
+    assert any(
+        json.loads(line)["status"] == "schedule_warning"
+        for line in events_path.read_text().splitlines()
+    ) is not short_schedule
 
 
 def test_checkpoint_policy_defaults_to_base_checkpoint_each_round(

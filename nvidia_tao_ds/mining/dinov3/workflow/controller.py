@@ -2762,7 +2762,7 @@ class RefinementWorkflow:
         allocation["lr_reference_world_size"] = reference_world_size
         allocation_path = output_dir / "training_allocation.json"
         _atomic_json(allocation_path, allocation)
-        training_spec, contract_path, _ = build_training_spec(
+        training_spec, contract_path, _, schedule_warning = build_training_spec(
             base_spec=base_spec_path,
             manifest=training_manifest,
             parent_checkpoint=initialization_checkpoint,
@@ -2772,6 +2772,11 @@ class RefinementWorkflow:
             gpus_per_node=int(allocation["gpus_per_node"]),
             checkpoint_policy=checkpoint_policy,
         )
+        if schedule_warning:
+            self.store.append_event(
+                state, round_index=round_index, stage="train",
+                status="schedule_warning", extra=schedule_warning,
+            )
         values = {
             "checkpoint": initialization_checkpoint,
             "training_manifest": training_manifest,
