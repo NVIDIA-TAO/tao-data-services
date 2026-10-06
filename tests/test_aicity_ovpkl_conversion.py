@@ -309,3 +309,272 @@ def test_video_decode_rejects_silent_empty_opencv_fallback(
             str(image_dir),
             num_frames=3,
         )
+
+
+def _unlabeled_config(tmp_path, rgb_format="jpg"):
+    """Build real image/calibration inputs and merge the shipped CLI schema."""
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from PIL import Image
+    from nvidia_tao_ds.config.annotations.default_config import ExperimentConfig
+
+    scene = tmp_path / "dataset" / "train" / "RealWarehouse"
+    scene.mkdir(parents=True)
+    sensors = []
+    for camera_index, camera in enumerate(["Camera1", "Camera2"]):
+        transform = np.eye(4)
+        transform[0, 3] = camera_index + 1.0
+        sensors.append({
+            "id": camera,
+            "type": "camera",
+            "intrinsicMatrix": [[20, 0, 8], [0, 20, 6], [0, 0, 1]],
+            "extrinsicMatrix": transform[:3].tolist(),
+            "attributes": [
+                {"name": "frameWidth", "value": "16"},
+                {"name": "frameHeight", "value": "12"},
+            ],
+        })
+        if rgb_format == "h5":
+            with h5py.File(scene / f"{camera}.h5", "w") as stream:
+                for frame_id in range(3):
+                    stream.create_dataset(
+                        f"rgb/rgb_{frame_id:05}.jpg",
+                        data=np.full((12, 16, 3), frame_id, dtype=np.uint8),
+                    )
+        else:
+            image_dir = scene / camera / "rgb"
+            image_dir.mkdir(parents=True)
+            for frame_id in range(3):
+                Image.new("RGB", (16, 12), color=(frame_id, 0, 0)).save(
+                    image_dir / f"{frame_id:09d}.jpg"
+                )
+    (scene / "calibration.json").write_text(json.dumps({
+        "version": "1.0", "osmURL": "", "calibrationType": "cartesian",
+        "sensors": sensors,
+    }), encoding="utf-8")
+    spec = Path(aicity_to_ovpkl.__file__).parents[1] / "experiment_specs/aicity2ovpkl.yaml"
+    cfg = OmegaConf.merge(OmegaConf.structured(ExperimentConfig), OmegaConf.load(spec))
+    cfg.results_dir = str(tmp_path / "output")
+    cfg.aicity.root = str(tmp_path / "dataset")
+    cfg.aicity.rgb_format = rgb_format
+    cfg.aicity.camera_grouping_mode = ""
+    cfg.aicity.recentering = False
+    cfg.aicity.class_config.CLASS_LIST = ["person"]
+    cfg.aicity.load_annotations = False
+    cfg.aicity.fps = 12.5
+    return cfg, scene
+
+
+@pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
+def test_public_converter_prepares_unlabeled_calibrated_scene(tmp_path, monkeypatch, rgb_format):
+    """Missing GT/depth is explicit, calibration is real, and anchors are untouched."""
+    from pathlib import Path
+
+    cfg, scene = _unlabeled_config(tmp_path, rgb_format)
+    output = Path(cfg.results_dir)
+    output.mkdir()
+    anchor = output / cfg.aicity.anchor_init_config.output_file_name
+    anchor.write_bytes(b"existing pretrained anchors")
+    anchor_init = mock.Mock(side_effect=AssertionError("must not fit anchors on unlabeled data"))
+    monkeypatch.setattr(aicity_to_ovpkl, "anchor_initialization", anchor_init)
+
+    aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+
+    assert not (scene / "ground_truth.json").exists()
+    assert anchor.read_bytes() == b"existing pretrained anchors"
+    anchor_init.assert_not_called()
+    payload = _load_scene(output, "RealWarehouse")
+    assert payload["metadata"]["class_names"] == ["person"]
+    assert len(payload["infos"]) == 3
+    for frame_id, info in enumerate(payload["infos"]):
+        assert info["gt_boxes"] is None
+        assert info["timestamp"] == pytest.approx(frame_id / 12.5)
+        assert info["frame_idx"] == frame_id
+        assert info["token"] == f"RealWarehouse__{frame_id:09d}"
+        assert list(info["cams"]) == ["Camera1", "Camera2"]
+        for camera_index, camera in enumerate(info["cams"].values()):
+            assert "depth_map_path" not in camera
+            assert camera["cam_intrinsic"][0, 0] == 20
+            assert camera["sensor2world_transform"][0, 3] == camera_index + 1.0
+
+
+def test_public_converter_still_requires_gt_by_default(tmp_path):
+    """An absent GT file must not silently change a labeled conversion's route."""
+    cfg, _ = _unlabeled_config(tmp_path)
+    from nvidia_tao_ds.config.annotations.default_config import AICityConfig
+    cfg.aicity.load_annotations = AICityConfig().load_annotations
+    assert cfg.aicity.load_annotations is True
+    with pytest.raises(FileNotFoundError, match="ground_truth.json"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+
+
+@pytest.mark.parametrize("fps", [0, -1, float("nan"), float("inf")])
+def test_converter_rejects_invalid_capture_rate(tmp_path, monkeypatch, fps):
+    """Reject invalid timestamps before decoding videos or creating outputs."""
+    cfg, _ = _unlabeled_config(tmp_path)
+    cfg.aicity.fps = fps
+    cfg.aicity.rgb_format = "mp4"
+    decode = mock.Mock(side_effect=AssertionError("must validate before decoding"))
+    monkeypatch.setattr(aicity_to_ovpkl, "video_to_frame", decode)
+    with pytest.raises(ValueError, match="fps must be finite and positive"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    decode.assert_not_called()
+    assert not os.path.exists(cfg.results_dir)
+
+
+@pytest.mark.parametrize("num_frames", [0, -2])
+def test_converter_rejects_invalid_frame_limit(tmp_path, monkeypatch, num_frames):
+    """An invalid frame limit must not start an expensive MP4 conversion."""
+    cfg, _ = _unlabeled_config(tmp_path)
+    cfg.aicity.num_frames = num_frames
+    cfg.aicity.rgb_format = "mp4"
+    decode = mock.Mock(side_effect=AssertionError("must validate before decoding"))
+    monkeypatch.setattr(aicity_to_ovpkl, "video_to_frame", decode)
+    with pytest.raises(ValueError, match="num_frames must be -1 or positive"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    decode.assert_not_called()
+    assert not os.path.exists(cfg.results_dir)
+
+
+@pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
+def test_unlabeled_conversion_reports_missing_camera_storage(tmp_path, rgb_format):
+    """Identify the calibration camera and expected path for missing images."""
+    cfg, scene = _unlabeled_config(tmp_path, rgb_format)
+    missing = scene / ("Camera2.h5" if rgb_format == "h5" else "Camera2/rgb")
+    missing.rename(missing.with_name(missing.name + ".unavailable"))
+    with pytest.raises(FileNotFoundError, match="Calibration camera Camera2: expected RGB") as error:
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    assert str(missing) in str(error.value)
+    if rgb_format == "h5":
+        assert str(scene / "Camera2.hdf5") in str(error.value)
+    assert not list(tmp_path.rglob("*.pkl"))
+
+
+def test_unlabeled_conversion_rejects_missing_camera_frame(tmp_path):
+    """Do not publish image references that fail later in the training loader."""
+    cfg, scene = _unlabeled_config(tmp_path)
+    (scene / "Camera2/rgb/000000001.jpg").unlink()
+    with pytest.raises(ValueError, match="contiguous camera frames"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    assert not list(tmp_path.rglob("*.pkl"))
+
+
+def test_velocity_uses_configured_frame_rate():
+    """Ground-truth velocities use the same time base as frame timestamps."""
+    velocity = aicity_to_ovpkl._get_object_velocity(
+        np.array([[0.1, 0, 0]]), np.array([7]),
+        [{"object id": 7, "3d location": [0, 0, 0]}], fps=12.5,
+    )
+    np.testing.assert_allclose(velocity, [[1.25, 0, 0]])
+
+
+@pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
+def test_unlabeled_artifacts_load_in_tao_pytorch(tmp_path, rgb_format, sparse4d_runtime):
+    """Exercise real DS PKLs, lazy index, KITTI cache, image/depth and TAO joins.
+
+    Run with the companion TAO PyTorch checkout on PYTHONPATH. Minimal Data
+    Services images without co-training support skip this integration test;
+    --require-sparse4d-runtime makes missing capabilities a hard failure.
+    """
+    import io
+    from pathlib import Path
+    import tarfile
+    dataset_module, transforms = sparse4d_runtime
+    from nvidia_tao_ds.annotations.sparse4d.lazy_index import build_lazy_index
+    from nvidia_tao_ds.annotations.sparse4d.sidecars import build_rtdetr_archive_sidecar
+
+    cfg, scene = _unlabeled_config(tmp_path, rgb_format)
+    aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+    output = Path(cfg.results_dir)
+    pkl_path = output / "train/RealWarehouse_infos_train.pkl"
+    split = output / "mixed.txt"
+    split.write_text(str(pkl_path) + "\n", encoding="utf-8")
+    build_lazy_index(split, num_workers=1)
+    for camera in ["Camera1", "Camera2"]:
+        label_dir = scene / "rt-detr" / camera
+        label_dir.mkdir(parents=True)
+        with tarfile.open(label_dir / "labels.tar.gz", "w:gz") as archive:
+            for frame_id in range(3):
+                # Preserve an explicitly processed frame with no detections.
+                labels = b"person 0 0 0 1 1 6 9 0 0 0 0 0 0 0 0.9\n" if frame_id < 2 else b""
+                member = tarfile.TarInfo(f"{frame_id:09d}.txt")
+                member.size = len(labels)
+                archive.addfile(member, io.BytesIO(labels))
+    cache_dir = output / "rtdetr"
+    build_rtdetr_archive_sidecar(
+        scene / "rt-detr", cache_dir / "RealWarehouse__rtdetr2d.npz",
+        class_names=["person"], scene_name="RealWarehouse",
+    )
+    for lazy in (False, True):
+        dataset = dataset_module.Omniverse3DDetTrackDataset(
+            data_root=str(scene.parent), anno_file=str(split), classes=["person"],
+            lazy_load=lazy, with_seq_flag=True,
+        )
+        assert len(dataset) == 3
+        load_cache = transforms.LoadRTDETR2D(cache_dir=cache_dir, class_names=["person"])
+        for frame_id in range(3):
+            sample = dataset.get_data_info(frame_id)
+            assert sample["has_3d_gt"] is False
+            assert sample["gt_bboxes_3d"].shape == (0, 9)
+            assert sample["timestamp"] == pytest.approx(frame_id / 12.5)
+            assert sample["depth_map_filename"] == [None, None]
+            sample = transforms.LoadMultiViewImageFromFiles(h5_file=rgb_format == "h5")(sample)
+            sample = transforms.LoadDepthMap(default_shape=(12, 16), h5_file=True)(sample)
+            assert all(image.shape == (12, 16, 3) for image in sample["img"])
+            assert all(np.all(depth == -1) for depth in sample["gt_depth"])
+            sample = load_cache(sample)
+            assert sample["has_2d_pseudo"] is True
+            assert sample["has_3d_gt"] is False
+            for camera_index in range(2):
+                intrinsic = np.array([[20, 0, 8], [0, 20, 6], [0, 0, 1]])
+                extrinsic = np.eye(4)
+                extrinsic[0, 3] = camera_index + 1.0
+                np.testing.assert_allclose(sample["lidar2img"][camera_index][:3], intrinsic @ extrinsic[:3])
+                assert sample["det_boxes_2d"][camera_index].shape == ((1 if frame_id < 2 else 0), 4)
+
+
+@pytest.mark.parametrize("rgb_format", ["jpg", "h5"])
+def test_unlabeled_scene_rejects_unequal_camera_lengths(tmp_path, rgb_format):
+    """Unequal clips must not silently truncate the camera with extra frames."""
+    cfg, scene = _unlabeled_config(tmp_path, rgb_format)
+    if rgb_format == "h5":
+        with h5py.File(scene / "Camera2.h5", "a") as stream:
+            del stream["rgb/rgb_00002.jpg"]
+    else:
+        (scene / "Camera2/rgb/000000002.jpg").unlink()
+    with pytest.raises(ValueError, match="same number of synchronized frames"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+
+
+def test_unlabeled_h5_rejects_noncontiguous_keys(tmp_path):
+    """Do not emit HDF5 references to missing source frame IDs."""
+    cfg, scene = _unlabeled_config(tmp_path, "h5")
+    with h5py.File(scene / "Camera2.h5", "a") as stream:
+        stream.move("rgb/rgb_00001.jpg", "rgb/rgb_00003.jpg")
+    with pytest.raises(ValueError, match="contiguous camera frames"):
+        aicity_to_ovpkl.convert_aicity_to_ovpkl(cfg)
+
+
+def test_convert_cli_accepts_unlabeled_spec_and_timing_overrides(tmp_path, monkeypatch):
+    """Run the actual Hydra command used by annotations convert, with its schema."""
+    from pathlib import Path
+    from omegaconf import OmegaConf
+    from nvidia_tao_ds.annotations.scripts import convert
+
+    cfg, _ = _unlabeled_config(tmp_path)
+    spec_dir = Path(aicity_to_ovpkl.__file__).parents[1] / "experiment_specs"
+    spec = OmegaConf.load(spec_dir / "aicity2ovpkl_unlabeled.yaml")
+    spec.aicity.root = cfg.aicity.root
+    spec.results_dir = cfg.results_dir
+    OmegaConf.save(spec, tmp_path / "unlabeled.yaml")
+    monkeypatch.setattr(sys, "argv", [
+        "convert", "--config-path", str(tmp_path), "--config-name", "unlabeled",
+        "aicity.load_annotations=false", "aicity.fps=12.5", "aicity.num_frames=2",
+    ])
+    convert.main()
+
+    payload = _load_scene(Path(cfg.results_dir), "RealWarehouse")
+    assert len(payload["infos"]) == 2
+    assert payload["infos"][1]["timestamp"] == pytest.approx(1 / 12.5)
+    assert all(info["gt_boxes"] is None for info in payload["infos"])
+    assert not list(Path(cfg.results_dir).glob("*.npy"))

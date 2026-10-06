@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
-ARG ARM64_DIGEST=a61757dd0d41e68442e9199fafa54008e8bc5ba93f3a5e3754afbf558ec57d16
-ARG X86_DIGEST=6c3bcb904cf4b4364332ceba184516dadd032f420e88de9b323b143a5a54883e
+ARG ARM64_DIGEST=18703f7687056ac7e0f3321b81111496cef2a7509fa8541ffa9508345e6cdcec
+ARG X86_DIGEST=40244a21f9d268ee50835f355a044ced080772d57dbcb98eff6613172d538fff
 
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${ARM64_DIGEST} AS base-arm64
 FROM nvcr.io/nvstaging/tao/data_services_base_image@sha256:${X86_DIGEST} AS base-amd64
