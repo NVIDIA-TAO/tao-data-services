@@ -91,6 +91,53 @@ def _get_h5_depth_path(scene_path, scene_name, camera_storage_name, frame_id):
     return (absolute_path, depth_key), (relative_path, depth_key)
 
 
+def _calibration_matrices(calibration):
+    """Read SDU 2.x canonical keys while accepting legacy 1.x dictionaries."""
+    intrinsic_key = "intrinsic_matrix" if "intrinsic_matrix" in calibration else "intrinsic matrix"
+    extrinsic_key = "w2c_matrix" if "w2c_matrix" in calibration else "projection matrix w2c"
+    return np.asarray(calibration[intrinsic_key]), np.asarray(calibration[extrinsic_key])
+
+
+def _unlabeled_camera_frames(scene_path, camera_names, rgb_format):
+    """Validate synchronized, zero-based image sequences using calibration IDs."""
+    storage_names = []
+    counts = []
+    for camera in sorted(camera_names):
+        if rgb_format == "h5":
+            storage_name = _find_h5_filename(scene_path, camera)
+            image_path = os.path.join(scene_path, storage_name)
+            if not os.path.isfile(image_path):
+                candidates = ", ".join(os.path.join(scene_path, camera + suffix) for suffix in _H5_SUFFIXES)
+                raise FileNotFoundError(f"Calibration camera {camera}: expected RGB storage at {candidates}")
+            with h5py.File(image_path, "r") as stream:
+                frames = set(stream["rgb"].keys())
+            expected = {f"rgb_{frame_id:05}.jpg" for frame_id in range(len(frames))}
+            valid = frames == expected
+        else:
+            storage_name = camera
+            image_dir = os.path.join(scene_path, camera, "rgb")
+            if not os.path.isdir(image_dir):
+                raise FileNotFoundError(f"Calibration camera {camera}: expected RGB directory at {image_dir}")
+            frames = {
+                name for name in os.listdir(image_dir)
+                if name.endswith(f".{rgb_format}") and os.path.isfile(os.path.join(image_dir, name))
+            }
+            # The two existing AICity naming conventions may be mixed.
+            expected_ids = range(len(frames))
+            valid = all(
+                f"rgb_{frame_id:05}.{rgb_format}" in frames or
+                f"{frame_id:09}.{rgb_format}" in frames
+                for frame_id in expected_ids
+            )
+        if not frames or not valid:
+            raise ValueError(f"{camera}: expected nonempty contiguous camera frames starting at zero")
+        storage_names.append(storage_name)
+        counts.append(len(frames))
+    if not counts or len(set(counts)) != 1:
+        raise ValueError("All calibrated cameras must have the same number of synchronized frames")
+    return storage_names, counts[0]
+
+
 def _is_annotation_pkl(filename):
     """Return whether a filename is a scene annotation rather than an index."""
     return (
@@ -98,6 +145,14 @@ def _is_annotation_pkl(filename):
         filename not in _GENERATED_ANNOTATION_CACHE_FILENAMES and
         not filename.endswith("_lazy_index.pkl")
     )
+
+
+def _validate_frame_timing(fps, num_frames):
+    """Reject invalid capture timing before decoding videos or writing outputs."""
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError("aicity.fps must be finite and positive")
+    if num_frames != -1 and num_frames <= 0:
+        raise ValueError("aicity.num_frames must be -1 or positive")
 
 
 def convert_aicity_to_ovpkl(
@@ -111,7 +166,7 @@ def convert_aicity_to_ovpkl(
         verbose (bool): Verbosity.
     """
     if cfg is not None:
-        root_path = cfg.aicity.root
+        root_path = os.path.abspath(os.path.expanduser(cfg.aicity.root))
         version = cfg.aicity.version
         splits = cfg.aicity.split
         class_config = cfg.aicity.class_config
@@ -123,9 +178,12 @@ def convert_aicity_to_ovpkl(
         class_config = update_class_config(class_config)
         output_dir = cfg.results_dir
         num_frames = cfg.aicity.num_frames
+        load_anno = cfg.aicity.load_annotations
+        fps = cfg.aicity.fps
     else:
         raise ValueError("config is not provided")
 
+    _validate_frame_timing(fps, num_frames)
     if not os.path.isdir(root_path):
         raise FileNotFoundError(f"Root path {root_path} does not exist")
 
@@ -168,13 +226,17 @@ def convert_aicity_to_ovpkl(
                 recentering=recentering,
                 num_frames=num_frames,
                 verbose=verbose,
+                load_anno=load_anno,
+                fps=fps,
             )
     elif version == "2024":
         raise NotImplementedError("2024 version is not implemented")
     else:
         raise ValueError(f"Invalid version: {version}")
 
-    if "train" in splits and anchor_init_config.num_anchor > 0:
+    if not load_anno:
+        logger.info("Skipping anchor initialization for unlabeled scenes; reuse pretrained anchors.")
+    elif "train" in splits and anchor_init_config.num_anchor > 0:
         anchor_initialization(
             ann_file=os.path.join(output_dir, "train"),
             num_anchor=anchor_init_config.num_anchor,
@@ -315,7 +377,9 @@ def create_ov_infos_aicity2025(
     version='2025', split='train', class_config=None,
     camera_group_config=None, recentering=False,
     num_frames=-1,
-    verbose=False
+    verbose=False,
+    load_anno=True,
+    fps=FPS,
 ):
     """Create info file of AICity2025 dataset.
 
@@ -329,7 +393,10 @@ def create_ov_infos_aicity2025(
         class_config (dict): Class config.
         camera_group_config (dict): Camera group config.
         recentering (bool): Whether to recenter the data.
+        load_anno (bool): Load ground truth and depth; False emits unlabeled frames.
+        fps (float): Capture rate of synchronized, contiguous frames.
     """
+    _validate_frame_timing(fps, num_frames)
     split_root_path = os.path.join(root_path, split)
     scene_names = sorted(
         name for name in os.listdir(split_root_path)
@@ -344,11 +411,12 @@ def create_ov_infos_aicity2025(
     infos, scene_names_with_grouping = _fill_trainval_infos(
         split_root_path, scene_names, info_prefix,
         rgb_format=rgb_format, depth_format=depth_format,
-        load_anno=True, class_config=class_config,
+        load_anno=load_anno, class_config=class_config,
         camera_group_config=camera_group_config,
         recentering=recentering,
         num_frames=num_frames,
         verbose=verbose,
+        fps=fps,
     )
 
     metadata = {
@@ -382,7 +450,8 @@ def _fill_trainval_infos(
     load_anno=True, class_config=None,
     camera_group_config=None, recentering=False,
     num_frames=-1,
-    verbose=False
+    verbose=False,
+    fps=FPS,
 ):
     """Generate the train/val infos from the raw data.
 
@@ -439,7 +508,16 @@ def _fill_trainval_infos(
         cam_names = sorted(
             get_cam_names_in_scene(scene_path, h5_file=(rgb_format == "h5"))
         )
-        if rgb_format == "h5":
+        if not load_anno:
+            grouped = camera_group_config is not None and (
+                camera_group_config["use_camera_groups"] or camera_group_config["use_training_camera_groups"]
+            )
+            calibration_cameras = (
+                {camera for group in calib_dict.values() for camera in group}
+                if grouped else set(calib_dict)
+            )
+            cam_names, n_frames = _unlabeled_camera_frames(scene_path, calibration_cameras, rgb_format)
+        elif rgb_format == "h5":
             with h5py.File(os.path.join(scene_path, cam_names[0]), "r") as f:
                 n_frames = len(f["rgb"])
         else:
@@ -496,7 +574,7 @@ def _fill_trainval_infos(
                     "frame_idx": frame_id,
                     "cams": {},
                     "scene_name": scene_name,
-                    "timestamp": frame_id / FPS,
+                    "timestamp": frame_id / fps,
                     "token": f"{sub_scene_name}__{frame_id:09}",
                 }
                 if camera_group_config is not None and \
@@ -529,6 +607,8 @@ def _fill_trainval_infos(
                         if not os.path.exists(cam_path):
                             cam_path = os.path.join(scene_path, cam, "rgb", f"{frame_id:09}.{rgb_format}")
                         if not os.path.exists(cam_path):
+                            if not load_anno:
+                                raise FileNotFoundError(f"Missing synchronized camera frame: {cam_path}")
                             logger.warning(f"no file found at {cam_path}")
                     if load_anno:
                         if depth_format == "h5":
@@ -545,14 +625,10 @@ def _fill_trainval_infos(
                             dm_relative_path = f"{scene_name}/{cam}/distance_to_image_plane_png/distance_to_image_plane_{frame_id:05}.{depth_format}"
                             if not os.path.exists(dm_path):
                                 logger.warning(f"no file found at {dm_path}")
-                    else:
-                        dm_path = ""
-                        dm_relative_path = ""
                     sd_token = f"{info['token']}+{cam}"
                     if camera_group_config is not None and \
                             (camera_group_config["use_camera_groups"] or camera_group_config["use_training_camera_groups"]):
-                        cam_intrinsic = np.array(calib_dict[group_name][cam]["intrinsic matrix"])
-                        cam_sensor2world = np.array(calib_dict[group_name][cam]["projection matrix w2c"])
+                        cam_intrinsic, cam_sensor2world = _calibration_matrices(calib_dict[group_name][cam])
                         if recentering and group_area_dict is not None:
                             # shift camera to group center
                             cam_world2sensor = np.linalg.inv(cam_sensor2world)
@@ -560,12 +636,12 @@ def _fill_trainval_infos(
                             cam_world2sensor[1, -1] -= group_origin[1]
                             cam_sensor2world = np.linalg.inv(cam_world2sensor)
                     else:
-                        cam_intrinsic = np.array(calib_dict[cam]["intrinsic matrix"])
-                        cam_sensor2world = np.array(calib_dict[cam]["projection matrix w2c"])
+                        cam_intrinsic, cam_sensor2world = _calibration_matrices(calib_dict[cam])
 
                     cam_info = {}
                     cam_info.update(data_path=cam_path)
-                    cam_info.update(depth_map_path=dm_relative_path)
+                    if load_anno:
+                        cam_info.update(depth_map_path=dm_relative_path)
                     cam_info.update(sample_data_token=sd_token)
                     cam_info.update(cam_intrinsic=cam_intrinsic)
                     cam_info.update(sensor2world_transform=cam_sensor2world)
@@ -608,7 +684,7 @@ def _fill_trainval_infos(
                         [anno["object id"] for anno in annotations],
                         dtype=np.int64,
                     )  # TODO: check if duplicated ids for different object types
-                    velocity = _get_object_velocity(locs, instance_inds, annotations_prev)
+                    velocity = _get_object_velocity(locs, instance_inds, annotations_prev, fps=fps)
                     valid_flag = np.array(
                         [True for anno in annotations],
                         dtype=bool).reshape(-1)
@@ -728,6 +804,8 @@ def _fill_trainval_infos(
                     if has_2d_boxes:
                         info["gt_visibility"] = visibilities
 
+                if not load_anno:
+                    info["gt_boxes"] = None
                 train_scene_nusc_infos.append(info)
 
             if verbose:
@@ -758,7 +836,7 @@ def _calculate_bbox_area(bbox):
     return area
 
 
-def _get_object_velocity(locations, instance_inds, annotations_prev, vel_dim=3):
+def _get_object_velocity(locations, instance_inds, annotations_prev, vel_dim=3, fps=FPS):
     if len(annotations_prev) == 0:
         return np.zeros((len(locations), vel_dim))
     locations_prev = copy.deepcopy(locations)  # copy from current frame: if object not found in previous frame, vel will be zeros
@@ -771,7 +849,7 @@ def _get_object_velocity(locations, instance_inds, annotations_prev, vel_dim=3):
         else:
             # obj_id does not appear in current frame
             pass
-    velocities = (locations - locations_prev) * FPS
+    velocities = (locations - locations_prev) * fps
 
     # sanity check on velocity
     assert not np.any(np.abs(velocities) > 5), \

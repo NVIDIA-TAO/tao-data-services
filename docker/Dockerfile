@@ -141,21 +141,27 @@ RUN pip install -c /tmp/base-constraints.txt "setuptools-scm<10"
 # matches exactly, so this is a no-op for opencv but lets the constraints file catch
 # any future base drift.
 COPY docker/requirements-pip.txt requirements-pip.txt
-RUN pip install -c /tmp/base-constraints.txt -r requirements-pip.txt && \
-    rm -rf requirements-pip.txt
+RUN set -eu; \
+    test "$(grep -c '^spatialai-data-utils==' requirements-pip.txt)" -eq 1; \
+    sdu_requirement="$(grep '^spatialai-data-utils==' requirements-pip.txt)"; \
+    grep -v '^spatialai-data-utils==' requirements-pip.txt > /tmp/tao-resolved-requirements.txt; \
+    pip install -c /tmp/base-constraints.txt -r /tmp/tao-resolved-requirements.txt; \
+    pip install --no-deps \
+        --extra-index-url https://edge.urm.nvidia.com/artifactory/api/pypi/sw-metropolis-pypi/simple \
+        "${sdu_requirement}"; \
+    python -c 'import importlib.metadata as m, sys; actual = m.version("spatialai-data-utils"); assert actual == sys.argv[1], (actual, sys.argv[1]); print("Installed spatialai-data-utils", actual)' "${sdu_requirement#*==}"; \
+    rm -f requirements-pip.txt /tmp/tao-resolved-requirements.txt
 
-# spatialai_data_utils 1.0.0 pins tqdm==4.67.1 exactly which would downgrade base tqdm 4.67.3.
+# SDU's single version declaration lives in requirements-pip.txt; the separate
+# --no-deps install above preserves the curated NumPy/SciPy/OpenCV stack.
 # leptonai pins anyio<=4.9.0 across all published versions, conflicting with base anyio 4.13.0.
 # nvidia-eff is imported by tao-pytorch's checkpoint encryption code (eff.core/eff.codec/
 # eff.validator). Its wheel has cp312 binaries but the PyPI metadata mis-declares
 # requires_python==3.8.*, hence --ignore-requires-python. Its declared deps include
 # legacy pins (pyarmor==8.5.8, isort<5, black==22.3.0) we don't want to honor.
-# All three are installed --no-deps; usage in tao-core/tao-pytorch only touches public
+# These packages are installed --no-deps; usage in tao-core/tao-pytorch only touches public
 # APIs that are tolerant of newer transitives.
-RUN pip install --no-deps \
-        --extra-index-url https://edge.urm.nvidia.com/artifactory/api/pypi/sw-metropolis-pypi/simple \
-        spatialai_data_utils==1.0.0 \
-    && pip install --no-deps "leptonai>=0.26.0" \
+RUN pip install --no-deps "leptonai>=0.26.0" \
     && pip install --no-deps --ignore-requires-python "nvidia-eff==0.6.6"
 
 # Install OpenAI CLIP and NVIDIA apex separately (require --no-build-isolation:
