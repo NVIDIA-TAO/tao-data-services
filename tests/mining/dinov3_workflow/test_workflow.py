@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -306,6 +307,7 @@ def _config(tmp_path: Path, strategy: str) -> WorkflowConfig:
             "source_store_validation": "full_sha256",
             "benchmark_manifest": str(benchmark),
             "benchmark_acquisition_units": str(benchmark_units),
+            "acquisition_unit_column": "sample_id",
             "source_payload_contract": str(source_payload_contract),
             "source_parts": [str(source_path)],
         },
@@ -731,6 +733,278 @@ def test_local_workflow_smoke_and_resume(tmp_path: Path, strategy: str) -> None:
     resumed = workflow.execute()
     assert resumed["status"] == "complete"
     assert (tmp_path / "run" / "events.jsonl").read_text(encoding="utf-8") == events_before
+
+
+@pytest.mark.parametrize("strategy", ["grit_score", "multi_task_round_robin"])
+@pytest.mark.parametrize("evaluate", [False, True])
+@pytest.mark.parametrize("identity", ["sample_id", "acquisition_unit_id", "content_sha256"])
+def test_benchmark_source_rows_never_reach_training(tmp_path, strategy, evaluate, identity):
+    """Declare held-out source rows before mining, not after inspecting outputs."""
+    value = _config(tmp_path, strategy).to_dict()
+    source_path = value["data"]["source_parts"][0]
+    source = pd.read_parquet(source_path, pre_buffer=False)
+    source.at[0, "embedding"] = [0.9, 0.2]
+    source["acquisition_unit_id"] = ["source-1", "held-out-unit", "source-3"]
+    source["content_sha256"] = ["a" * 64, "b" * 64, "c" * 64]
+    source.to_parquet(source_path, index=False)
+    target_path = value["data"]["target_manifest"]
+    targets = pd.read_parquet(target_path, pre_buffer=False)
+    targets["content_sha256"] = "d" * 64
+    targets.to_parquet(target_path, index=False)
+    value["data"]["acquisition_unit_column"] = "acquisition_unit_id"
+    benchmark = {"sample_id": ["renamed"], "acquisition_unit_id": ["unrelated-unit"]}
+    if identity == "sample_id":
+        benchmark[identity] = ["s2"]
+    elif identity == "acquisition_unit_id":
+        benchmark[identity] = ["held-out-unit"]
+    else:
+        benchmark[identity] = ["b" * 64]
+    pd.DataFrame(benchmark).to_parquet(
+        value["data"]["benchmark_acquisition_units"], index=False
+    )
+    if not evaluate:
+        value["actions"]["evaluate"]["command"] = []
+    if strategy == "multi_task_round_robin":
+        value["multi_task"]["policy"] = "balanced"
+    value["mining"]["duplicate_similarity"] = 1.0
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    state = workflow.execute()
+    assert state["status"] == "complete"
+    for name in ("search/neighbors.parquet", "materialize/training_manifest.parquet"):
+        frame = pd.read_parquet(tmp_path / "run/rounds/round_001" / name, pre_buffer=False)
+        assert "s2" not in set(frame.sample_id)
+        assert not frame.empty
+    assert workflow.execute()["status"] == "complete"
+
+
+@pytest.mark.parametrize("evaluate", [False, True])
+def test_benchmark_rejects_targets_and_parent_before_launch(tmp_path, evaluate):
+    """Benchmark constraints apply even without an evaluator."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    if not evaluate:
+        value["actions"]["evaluate"]["command"] = []
+    units = value["data"]["benchmark_acquisition_units"]
+    pd.DataFrame({"sample_id": ["q1"]}).to_parquet(units, index=False)
+    with pytest.raises(ValueError, match="Adaptive targets overlaps the sealed benchmark"):
+        RefinementWorkflow(WorkflowConfig.from_dict(value)).validate()
+    pd.DataFrame({"sample_id": ["s2"]}).to_parquet(units, index=False)
+    value["data"]["previous_training_manifest"] = value["data"]["source_parts"][0]
+    with pytest.raises(ValueError, match="Previous training manifest overlaps"):
+        RefinementWorkflow(WorkflowConfig.from_dict(value)).validate()
+    assert not (tmp_path / "run/state.json").exists()
+
+
+def test_benchmark_rejects_completed_run_contamination(tmp_path):
+    """A completed-state shortcut must still reject contaminated manifests."""
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    state = workflow.execute()
+    manifest = Path(state["current_training_manifest"])
+    frame = pd.read_parquet(manifest, pre_buffer=False)
+    frame["sample_id"] = "sealed-1"
+    frame.to_parquet(manifest, index=False)
+    with pytest.raises(ValueError, match="Cached training manifest overlaps"):
+        workflow.execute()
+
+
+def test_benchmark_sidecar_required_without_evaluator(tmp_path):
+    """An opaque evaluator manifest alone cannot prove training disjointness."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    value["actions"]["evaluate"]["command"] = []
+    del value["data"]["benchmark_acquisition_units"]
+    with pytest.raises(ValueError, match="benchmark_acquisition_units"):
+        WorkflowConfig.from_dict(value)
+
+
+@pytest.mark.parametrize("units", ["", "  "])
+@pytest.mark.parametrize("evaluate", [False, True])
+def test_empty_benchmark_sidecar_path_cannot_disable_isolation(tmp_path, units, evaluate):
+    """A blank sidecar path must fail, not silently skip every benchmark check."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    if not evaluate:
+        value["actions"]["evaluate"]["command"] = []
+    value["data"]["benchmark_acquisition_units"] = units
+    with pytest.raises(ValueError, match="benchmark_acquisition_units must not be empty"):
+        WorkflowConfig.from_dict(value)
+
+
+def test_invalid_evaluation_scope_is_reported_first(tmp_path):
+    """A misspelled scope names the scope, not a consequence of it."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    value["actions"]["evaluate"]["scope"] = "Diagnostic_Replay"
+    del value["data"]["benchmark_acquisition_units"]
+    with pytest.raises(ValueError, match="scope must be sealed_benchmark or diagnostic_replay"):
+        WorkflowConfig.from_dict(value)
+
+
+def test_source_without_declared_identity_fails_before_any_stage(tmp_path):
+    """Missing source identities fail at validation, before GPU work starts."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    targets = pd.read_parquet(value["data"]["target_manifest"], pre_buffer=False)
+    targets["content_sha256"] = "d" * 64
+    targets.to_parquet(value["data"]["target_manifest"], index=False)
+    pd.DataFrame({"sample_id": ["sealed-1"], "content_sha256": ["a" * 64]}).to_parquet(
+        value["data"]["benchmark_acquisition_units"], index=False
+    )
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    with pytest.raises(ValueError, match=r"Source shard lacks benchmark identities \['content_sha256'\]"):
+        workflow.execute()
+    assert not (tmp_path / "run/rounds").exists()
+    # A failed projection is not cached as "no exclusions".
+    with pytest.raises(ValueError, match="Source shard lacks benchmark identities"):
+        workflow._benchmark_source_rows()
+
+
+def test_empty_source_identity_names_the_shard(tmp_path):
+    """A store with many shards must say which one holds the bad identity."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    targets = pd.read_parquet(value["data"]["target_manifest"], pre_buffer=False)
+    targets["content_sha256"] = "d" * 64
+    targets.to_parquet(value["data"]["target_manifest"], index=False)
+    pd.DataFrame({"sample_id": ["sealed-1"], "content_sha256": ["a" * 64]}).to_parquet(
+        value["data"]["benchmark_acquisition_units"], index=False
+    )
+    shard = Path(value["data"]["source_parts"][0])
+    source = pd.read_parquet(shard, pre_buffer=False)
+    source["content_sha256"] = "b" * 64
+    source.at[0, "content_sha256"] = " "
+    source.to_parquet(shard, index=False)
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    with pytest.raises(ValueError, match=rf"^Source shard \S*{re.escape(shard.name)} has null or empty"):
+        workflow._benchmark_source_rows()
+
+
+def test_controller_rejects_manifest_from_data_action_without_guard(tmp_path, monkeypatch):
+    """An older data action that ignores the guard flags cannot publish held-out rows."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    source = pd.read_parquet(value["data"]["source_parts"][0], pre_buffer=False)
+    source.at[0, "embedding"] = [0.9, 0.2]
+    source.to_parquet(value["data"]["source_parts"][0], index=False)
+    pd.DataFrame({"sample_id": ["s2"]}).to_parquet(
+        value["data"]["benchmark_acquisition_units"], index=False
+    )
+    value["mining"]["duplicate_similarity"] = 1.0
+    old_action = tmp_path / "old_data_action.py"
+    old_action.write_text(
+        "import runpy, sys\n"
+        "args = sys.argv[1:]\n"
+        "for flag in ('--benchmark-acquisition-units', '--acquisition-unit-column'):\n"
+        "    if flag in args:\n"
+        "        del args[args.index(flag):args.index(flag) + 2]\n"
+        "sys.argv = ['refinement', *args]\n"
+        "runpy.run_module('nvidia_tao_ds.mining.dinov3.internal.refinement', run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    value["actions"]["data"]["command"] = [sys.executable, str(old_action)]
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    # Model a search adapter that ignores the projected exclusions.
+    monkeypatch.setattr(workflow, "_exclusion_manifest", lambda *args: None)
+    with pytest.raises(
+        workflow_controller.StageFailure, match="Training manifest overlaps the sealed benchmark"
+    ):
+        workflow.execute()
+    assert not (tmp_path / "run/rounds/round_001/train").exists()
+
+
+def test_diagnostic_replay_remains_explicitly_non_held_out(tmp_path):
+    """Operational replay permits overlap without claiming benchmark isolation."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    value["actions"]["evaluate"]["scope"] = "diagnostic_replay"
+    value["data"]["benchmark_acquisition_units"] = value["data"]["target_manifest"]
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    with pytest.raises(ValueError, match="Adaptive targets overlaps"):
+        workflow.validate()
+    del value["data"]["benchmark_acquisition_units"]
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    assert workflow.validate()["valid"]
+    assert workflow._benchmark_source_rows().empty
+    assert workflow.execute()["status"] == "complete"
+    value["actions"]["evaluate"]["command"] = []
+    with pytest.raises(ValueError, match="benchmark_acquisition_units"):
+        WorkflowConfig.from_dict(value)
+
+
+def test_cached_contract_only_training_input_is_benchmark_checked(tmp_path, monkeypatch):
+    """Adopted records need not contain a cached materialize-stage output."""
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    path = tmp_path / "balanced.parquet"
+    pd.DataFrame({"sample_id": ["sealed-1"]}).to_parquet(path, index=False)
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps({"manifest": str(path)}), encoding="utf-8")
+    monkeypatch.setattr(workflow, "_validate_training_outputs", lambda *args: None)
+    state = {"completed_stages": {"round_001/train": {"outputs": {
+        "contract": str(contract), "checkpoint": "checked.pth", "commit": "checked.json",
+        "implementation_audit": "checked-audit.json", "success": "checked-success",
+    }}}}
+    with pytest.raises(ValueError, match="Cached training input overlaps"):
+        workflow._validate_completed_training(state)
+
+
+@pytest.mark.parametrize("custom_id", [False, True])
+def test_benchmark_projection_preserves_indexed_corpus_lineage(tmp_path, monkeypatch, custom_id):
+    """Map benchmark aliases to global source row IDs, not benchmark row IDs."""
+    from nvidia_tao_ds.mining.dinov3.internal.refinement import _read_excluded_row_ids
+
+    value = _config(tmp_path, "grit_score").to_dict()
+    value["data"]["acquisition_unit_column"] = "unit"
+    pd.DataFrame({"sample_id": ["benchmark-alias"], "unit": ["held-out"]}).to_parquet(
+        value["data"]["benchmark_acquisition_units"], index=False
+    )
+    id_column = "image_id" if custom_id else "sample_id"
+    shards = []
+    for index, units in enumerate((["clean", "held-out"], ["held-out", "clean"])):
+        path = tmp_path / f"shard-{index}.parquet"
+        pd.DataFrame({
+            id_column: [f"source-{index}-0", f"source-{index}-1"], "unit": units,
+        }).set_index(id_column).to_parquet(path)
+        shards.append(path)
+    value["data"].pop("source_parts")
+    value["data"]["source_store_manifest"] = str(tmp_path / "store.json")
+    value["data"]["target_embedding_contract"] = str(tmp_path / "target.json")
+    value["actions"]["search"] = {
+        "backend": "custom", "command": ["custom-search"],
+        "parameters": {"dense_store_manifest": str(tmp_path / "dense.json")},
+    }
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    monkeypatch.setattr(workflow, "_source_parts", lambda: shards)
+    monkeypatch.setattr(workflow, "_verified_source_store", lambda **kwargs: (
+        {"id_column": id_column, "inventory_digest": "sha256:inventory"},
+        {"artifact_id": "sha256:store"}, shards, {},
+    ))
+    path = workflow._exclusion_manifest({"current_training_manifest": None}, 1)
+    assert _read_excluded_row_ids(
+        str(path), dense_store_artifact_id="sha256:dense", source_store_artifact_id="sha256:store",
+        source_inventory_digest="sha256:inventory",
+    ) == {1, 2}
+    with pytest.raises(ValueError, match="another source store"):
+        _read_excluded_row_ids(
+            str(path), dense_store_artifact_id="sha256:dense", source_store_artifact_id="sha256:wrong",
+            source_inventory_digest="sha256:inventory",
+        )
+    parent = tmp_path / "indexed-parent.parquet"
+    pd.DataFrame({"sample_id": ["parent"], "source_row_id": [3],
+                  "dense_store_artifact_id": ["sha256:dense"],
+                  "source_inventory_digest": ["sha256:inventory"]}).to_parquet(parent, index=False)
+    union = workflow._exclusion_manifest({"current_training_manifest": str(parent)}, 2)
+    assert _read_excluded_row_ids(
+        str(union), dense_store_artifact_id="sha256:dense", source_store_artifact_id="sha256:store",
+        source_inventory_digest="sha256:inventory",
+    ) == {1, 2, 3}
+    # A new invocation must not trust the schema of a stale exclusions file.
+    workflow._benchmark_rows = None
+    pd.DataFrame({"sample_id": ["stale"], "unit": ["wrong"]}).to_parquet(path, index=False)
+    fresh = workflow._exclusion_manifest({"current_training_manifest": str(parent)}, 2)
+    assert set(pd.read_parquet(fresh, pre_buffer=False).sample_id) == {
+        "source-0-1", "source-1-0", "parent",
+    }
+    if custom_id:
+        # Search emits the source id_column as sample_id, so it cannot be a unit.
+        pd.DataFrame({"sample_id": ["a"], "image_id": ["b"]}).to_parquet(
+            value["data"]["benchmark_acquisition_units"], index=False
+        )
+        workflow.config.value["data"]["acquisition_unit_column"] = "image_id"
+        workflow._benchmark_rows = None
+        with pytest.raises(ValueError, match="cannot be the source id_column 'image_id'"):
+            workflow._benchmark_source_rows()
 
 
 def test_metric_patience_stops_and_delivers_best_checkpoint(
@@ -1482,10 +1756,12 @@ def test_completed_native_training_is_finalized_without_relaunch_after_crash(
         actual_finalize(checkpoint.parent)
 
 
-@pytest.mark.parametrize("balanced_training", [False, True])
-@pytest.mark.parametrize("tamper_attestation", [False, True])
+@pytest.mark.parametrize("balanced_training,tamper_attestation,contaminated", [
+    (False, False, False), (True, False, False),
+    (False, True, False), (True, True, False), (True, False, True),
+])
 def test_sealed_training_continuation_is_adopted_then_evaluated(
-    tmp_path: Path, balanced_training: bool, tamper_attestation: bool,
+    tmp_path: Path, balanced_training: bool, tamper_attestation: bool, contaminated: bool,
 ) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     previous_run = tmp_path / "previous-run"
@@ -1504,6 +1780,10 @@ def test_sealed_training_continuation_is_adopted_then_evaluated(
         pd.concat([source, source], ignore_index=True).to_parquet(
             training_input_manifest, index=False
         )
+    if contaminated:
+        frame = pd.read_parquet(training_input_manifest, pre_buffer=False)
+        frame.loc[0, "sample_id"] = "sealed-1"
+        frame.to_parquet(training_input_manifest, index=False)
     checkpoint = train_dir / "checkpoint.pth"
     torch.save({"weight": torch.tensor([1.0])}, checkpoint)
     runtime_spec = train_dir / "experiment.yaml"
@@ -1638,6 +1918,14 @@ def test_sealed_training_continuation_is_adopted_then_evaluated(
     value["output"]["run_dir"] = str(tmp_path / "continuation-run")
     value["execution"]["workdir"] = str(tmp_path / "continuation-run")
     workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+
+    if contaminated:
+        # The unique parent is clean and all hashes/seals describe the actual
+        # contaminated balanced view; only the benchmark guard can reject it.
+        with pytest.raises(ValueError, match="Adopted training input overlaps"):
+            workflow.adopt_training()
+        assert not (tmp_path / "continuation-run/continuation_adoption.json").exists()
+        return
 
     if tamper_attestation:
         audit = json.loads(implementation_audit.read_text(encoding="utf-8"))

@@ -17,6 +17,7 @@ import tempfile
 
 
 from . import RefinementWorkflow, WorkflowConfig
+from ..benchmark import ISOLATION_CONTRACT
 from .execution import LocalRunner, StageRequest
 
 
@@ -146,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             except metadata.PackageNotFoundError:
                 versions[name] = "source-overlay"
         print(json.dumps({"modules": list(modules), "versions": versions,
+                          "contracts": {"benchmark_isolation": ISOLATION_CONTRACT},
                           "cuda_verified": args.gpu}, indent=2, sort_keys=True))
         return 0
     if args.command == "init":

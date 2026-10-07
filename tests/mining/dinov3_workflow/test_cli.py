@@ -55,6 +55,7 @@ def test_preflight_checks_all_installed_components(monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
     assert imports == result["modules"] + ["pytorch_lightning.loggers"]
     assert result["cuda_verified"] is False
+    assert result["contracts"] == {"benchmark_isolation": 1}
     logger_type.return_value.log_metrics.assert_called_once_with({"preflight": 0.0}, step=0)
     logger_type.return_value.finalize.assert_called_once_with("success")
     assert not Path(logger_type.call_args.kwargs["save_dir"]).exists()

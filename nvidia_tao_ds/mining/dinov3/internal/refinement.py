@@ -501,6 +501,8 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("--previous")
     materialize.add_argument("--query-manifest")
     materialize.add_argument("--balance-column")
+    materialize.add_argument("--benchmark-acquisition-units")
+    materialize.add_argument("--acquisition-unit-column", default="acquisition_unit_id")
     materialize.add_argument(
         "--overlap-policy",
         choices=("reject", "drop_existing"),
@@ -1294,6 +1296,8 @@ def _run_command(args) -> int:
             balance_column=args.balance_column,
             output_dir=args.output_dir,
             overlap_policy=args.overlap_policy,
+            benchmark_units_path=args.benchmark_acquisition_units,
+            acquisition_unit_column=args.acquisition_unit_column,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
     return 0
