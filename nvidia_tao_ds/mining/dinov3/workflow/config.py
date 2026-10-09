@@ -572,15 +572,23 @@ class WorkflowConfig:
             raise ValueError(
                 "actions.evaluate.scope must be sealed_benchmark or diagnostic_replay"
             )
+        # Only an explicit diagnostic replay may declare a benchmark without
+        # the identity sidecar; an empty path never disables isolation.
+        diagnostic_replay = evaluate["command"] and evaluate["scope"] == "diagnostic_replay"
+        units = data.get("benchmark_acquisition_units")
+        if units is not None and not str(units).strip():
+            raise ValueError("data.benchmark_acquisition_units must not be empty")
+        if not units and data.get("benchmark_manifest") and not diagnostic_replay:
+            raise ValueError(
+                "data.benchmark_acquisition_units is required when "
+                "data.benchmark_manifest is declared"
+            )
+        if units:
+            data.setdefault("acquisition_unit_column", "acquisition_unit_id")
         if not isinstance(evaluate["parameters"], dict):
             raise ValueError("actions.evaluate.parameters must be a mapping")
         if evaluate["command"]:
             _required(value, "data.benchmark_manifest")
-            if evaluate["scope"] == "sealed_benchmark":
-                _required(value, "data.benchmark_acquisition_units")
-                value["data"].setdefault(
-                    "acquisition_unit_column", "acquisition_unit_id"
-                )
             evaluate.setdefault("metrics", "{output_dir}/metrics.json")
             evaluate.setdefault(
                 "commit", "{output_dir}/evaluation_commit.json"

@@ -28,6 +28,11 @@ data:
   source_payload_contract: /path/to/source_payload_contract.json
   source_store_manifest: /path/to/mining_embedding_store/embedding_store.json
   target_embedding_contract: /path/to/target_embedding_contract.json
+  # Optional held-out benchmark; see docs/dinov3_refinement.md,
+  # "Held-out benchmark isolation". Declaring it requires the identity sidecar.
+  # benchmark_manifest: /path/to/sealed_benchmark_manifest.json
+  # benchmark_acquisition_units: /path/to/sealed_benchmark_units.parquet
+  # acquisition_unit_column: acquisition_unit_id
 
 grit:
   target_fraction: 0.10

@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 import pandas as pd
 
+from .benchmark import BenchmarkGuard
 from .contracts import (
     ArtifactManifest,
     file_identity,
@@ -205,6 +206,8 @@ def materialize_manifest(
     balance_column: str | None = None,
     id_column: str = "sample_id",
     overlap_policy: str = "reject",
+    benchmark_units_path: str | Path | None = None,
+    acquisition_unit_column: str = "acquisition_unit_id",
 ) -> dict:
     """Merge a novel delta into an immutable, exactly deduplicated manifest."""
     if overlap_policy not in {"reject", "drop_existing"}:
@@ -248,6 +251,11 @@ def materialize_manifest(
 
     if cumulative[id_column].duplicated().any():
         raise RuntimeError("Cumulative manifest contains duplicate sample IDs")
+
+    if benchmark_units_path:
+        BenchmarkGuard(benchmark_units_path, acquisition_unit_column).reject(
+            cumulative, label="Cumulative training manifest"
+        )
 
     destination = require_uncommitted_output(output_dir)
     manifest_path = destination / "training_manifest.parquet"
@@ -307,6 +315,10 @@ def materialize_manifest(
         },
         inputs=[
             file_identity(delta_path, role="delta"),
+            *(
+                [file_identity(benchmark_units_path, role="benchmark_acquisition_units")]
+                if benchmark_units_path else []
+            ),
             *(
                 [file_identity(previous_path, role="previous")]
                 if previous_path
