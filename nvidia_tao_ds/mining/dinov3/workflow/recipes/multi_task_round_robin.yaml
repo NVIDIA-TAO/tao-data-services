@@ -23,6 +23,11 @@ data:
   # weakness_score, and the target's fixed CLIP/SigLIP mining embedding.
   target_manifest: /path/to/adaptive_target_manifest.parquet
   previous_training_manifest: /path/to/parent_training_manifest.parquet
+  # Held-out benchmark: the identity sidecar lists sample_id, the acquisition
+  # unit column, and optional content_sha256. Targets, parent, source shards and
+  # training rows must carry the same columns. Without a benchmark, omit both
+  # benchmark_manifest and benchmark_acquisition_units.
+  # See docs/dinov3_refinement.md, "Held-out benchmark isolation".
   benchmark_manifest: /path/to/sealed_benchmark_manifest.json
   benchmark_acquisition_units: /path/to/sealed_benchmark_units.parquet
   acquisition_unit_column: acquisition_unit_id

@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from ..contracts import artifact_content_id, atomic_path, shard_content_seal_digest, write_json_atomic
+from ..benchmark import BenchmarkGuard
 
 from .config import (
     WorkflowConfig,
@@ -942,6 +943,7 @@ class RefinementWorkflow:
         self.run_dir = config.run_dir
         self.store = StateStore(self.run_dir)
         self.runner = build_runner(config.value["execution"], self.run_dir)
+        self._benchmark_rows: pd.DataFrame | None = None
         self._source_store_verification: tuple[
             dict[str, Any], dict[str, Any], list[Path], dict[str, Any]
         ] | None = None
@@ -956,6 +958,7 @@ class RefinementWorkflow:
         if require_paths:
             # Revalidate once per approval/resume, then reuse for data.lock.
             self._source_store_verification = None
+            self._benchmark_rows = None
         value = self.config.value
         paths = {
             "base_checkpoint": Path(value["model"]["base_checkpoint"]).expanduser(),
@@ -1096,12 +1099,13 @@ class RefinementWorkflow:
                 raise ValueError(
                     "Nonempty indexed parent history requires corpus lineage"
                 )
-        if (
-            require_paths and
-            value["actions"]["evaluate"]["command"] and
-            value["actions"]["evaluate"]["scope"] == "sealed_benchmark"
-        ):
-            self._validate_benchmark_disjointness()
+        guard = self._benchmark_guard() if require_paths else None
+        if guard:
+            guard.reject_parquet(paths["target_manifest"], label="Adaptive targets")
+            if parent:
+                guard.reject_parquet(Path(parent).expanduser(), label="Previous training manifest")
+            # Missing source identities must fail before any GPU stage runs.
+            self._benchmark_source_rows()
         return {
             "valid": not missing,
             "missing": missing,
@@ -1234,6 +1238,13 @@ class RefinementWorkflow:
             if configured
             else []
         )
+        benchmark = self._benchmark_source_rows()
+        if len(benchmark):
+            path = self.run_dir / "lineage" / "benchmark_exclusions.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_path(path) as temporary:
+                benchmark.to_parquet(temporary, index=False)
+            inputs.append(path)
         round_inputs = state.get("round_inputs", {}).get(str(round_index), state)
         if round_inputs["current_training_manifest"]:
             current = Path(round_inputs["current_training_manifest"]).resolve()
@@ -1257,9 +1268,10 @@ class RefinementWorkflow:
         lineage_columns = [
             "source_row_id",
             "dense_store_artifact_id",
+            "source_store_artifact_id",
             "source_inventory_digest",
         ]
-        if destination.is_file():
+        if destination.is_file() and benchmark.empty:
             parquet = pq.ParquetFile(destination)
             present = set(parquet.schema_arrow.names)
             if (
@@ -1296,7 +1308,7 @@ class RefinementWorkflow:
         identities = identities.drop_duplicates("sample_id", keep="first")
         if requires_corpus_lineage and len(identities):
             missing_lineage = (identities["source_row_id"].isna() |
-                               identities[lineage_columns[1:]].isna().all(axis=1))
+                               identities.reindex(columns=lineage_columns[1:]).isna().all(axis=1))
             if missing_lineage.any():
                 raise ValueError(
                     "Nonempty row-ID search exclusions contain incomplete corpus "
@@ -1309,6 +1321,60 @@ class RefinementWorkflow:
         with atomic_path(destination) as temporary:
             identities.to_parquet(temporary, index=False)
         return destination
+
+    def _benchmark_guard(self) -> BenchmarkGuard | None:
+        data = self.config.value["data"]
+        if not data.get("benchmark_acquisition_units"):
+            return None
+        return BenchmarkGuard(data["benchmark_acquisition_units"], data["acquisition_unit_column"])
+
+    def _benchmark_source_rows(self) -> pd.DataFrame:
+        """Project benchmark identities onto source rows, once per validation."""
+        if self._benchmark_rows is not None:
+            return self._benchmark_rows
+        rows = pd.DataFrame({
+            "sample_id": pd.Series(dtype="str"), "source_row_id": pd.Series(dtype="int64"),
+        })
+        guard = self._benchmark_guard()
+        if guard is None:
+            self._benchmark_rows = rows
+            return rows
+        data = self.config.value["data"]
+        id_column = "sample_id"
+        lineage = {}
+        if data.get("source_store_manifest"):
+            payload, artifact, _, _ = self._verified_source_store(cache=True)
+            id_column = payload.get("id_column", "sample_id")
+            lineage = {
+                "source_store_artifact_id": artifact["artifact_id"],
+                "source_inventory_digest": payload["inventory_digest"],
+            }
+        if id_column != "sample_id" and data["acquisition_unit_column"] == id_column:
+            raise ValueError(
+                "data.acquisition_unit_column cannot be the source id_column "
+                f"{id_column!r}; mined rows carry it as sample_id"
+            )
+        columns = [id_column if name == "sample_id" else name for name in guard.columns]
+        columns = list(dict.fromkeys(columns))
+        parts = []
+        offset = 0
+        for path in self._source_parts():
+            parquet = pq.ParquetFile(path)
+            if not parquet.metadata.num_rows:
+                continue
+            missing = set(columns).difference(parquet.schema_arrow.names)
+            if missing:
+                raise ValueError(f"Source shard lacks benchmark identities {sorted(missing)}: {path}")
+            for batch in parquet.iter_batches(batch_size=65536, columns=columns):
+                frame = batch.to_pandas(ignore_metadata=True)
+                frame["sample_id"] = frame[id_column]
+                selected = frame.loc[guard.matches(frame, label=f"Source shard {path}"), ["sample_id"]]
+                if len(selected):
+                    parts.append(selected.assign(source_row_id=selected.index + offset, **lineage))
+                offset += len(frame)
+        # Cache only a complete projection; a failure must fail again.
+        self._benchmark_rows = pd.concat(parts, ignore_index=True) if parts else rows
+        return self._benchmark_rows
 
     def _data_lock(self) -> dict[str, Any]:
         value = self.config.value
@@ -1677,26 +1743,6 @@ class RefinementWorkflow:
         lock["adapter_files"] = adapter_files
         lock["native_closure_version"] = "1.0"
         return lock
-
-    def _validate_benchmark_disjointness(self) -> None:
-        data = self.config.value["data"]
-        column = data["acquisition_unit_column"]
-        targets = pd.read_parquet(data["target_manifest"], pre_buffer=False)
-        benchmark = pd.read_parquet(data["benchmark_acquisition_units"], pre_buffer=False)
-        if column not in targets or column not in benchmark:
-            raise ValueError(
-                "Target and benchmark-unit manifests must contain the declared "
-                f"acquisition unit column {column!r}"
-            )
-        overlap = set(targets[column].astype(str)).intersection(
-            benchmark[column].astype(str)
-        )
-        if overlap:
-            examples = sorted(overlap)[:10]
-            raise ValueError(
-                "Adaptive targets overlap the sealed benchmark by acquisition unit: "
-                f"count={len(overlap)}, examples={examples}"
-            )
 
     def _initialize(self) -> dict[str, Any]:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -2651,6 +2697,13 @@ class RefinementWorkflow:
         ].get("previous_training_manifest")
         if previous_manifest:
             command.extend(["--previous", previous_manifest])
+        benchmark = self._benchmark_guard()
+        if benchmark:
+            data = self.config.value["data"]
+            command.extend([
+                "--benchmark-acquisition-units", data["benchmark_acquisition_units"],
+                "--acquisition-unit-column", data["acquisition_unit_column"],
+            ])
         balanced = (
             self.config.strategy == "multi_task_round_robin" and
             self.config.value["multi_task"]["policy"] == "balanced"
@@ -2667,6 +2720,10 @@ class RefinementWorkflow:
             )
 
         def validate_manifest() -> None:
+            if benchmark:
+                benchmark.reject_parquet(manifest, label="Training manifest")
+                if balanced:
+                    benchmark.reject_parquet(training_view, label="Balanced training manifest")
             artifact = _validate_output_artifact(
                 output_dir,
                 artifact_type="training_manifest",
@@ -2927,6 +2984,17 @@ class RefinementWorkflow:
             raise ValueError("Training success marker does not seal the final commit")
 
     def _validate_completed_training(self, state: dict[str, Any]) -> None:
+        benchmark = self._benchmark_guard()
+        if benchmark:
+            manifests = set()
+            if state.get("current_training_manifest"):
+                manifests.add(state["current_training_manifest"])
+            for record in state.get("completed_stages", {}).values():
+                for name, path in record.get("outputs", {}).items():
+                    if name in {"training_manifest", "balanced_training_manifest"}:
+                        manifests.add(path)
+            for path in sorted(manifests):
+                benchmark.reject_parquet(path, label="Cached training manifest")
         for key, record in state.get("completed_stages", {}).items():
             if not key.endswith("/train"):
                 continue
@@ -2945,6 +3013,9 @@ class RefinementWorkflow:
                 Path(outputs["commit"]),
                 Path(outputs["success"]),
             )
+            if benchmark:
+                contract = json.loads(Path(outputs["contract"]).read_text(encoding="utf-8"))
+                benchmark.reject_parquet(contract["manifest"], label="Cached training input")
 
     def _validate_adopted_training(self) -> dict[str, Any]:
         """Validate an immutable partial-round training result for continuation."""
@@ -3061,6 +3132,9 @@ class RefinementWorkflow:
         manifest_rows = int(
             pq.ParquetFile(training_input_manifest).metadata.num_rows
         )
+        benchmark = self._benchmark_guard()
+        if benchmark:
+            benchmark.reject_parquet(training_input_manifest, label="Adopted training input")
         base_spec = Path(self.config.value["training"]["base_spec"]).expanduser()
         batch_size = resolved_training_batch_size(base_spec)
         resources = self.config.value["actions"]["train"].get("resources", {})

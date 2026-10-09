@@ -37,8 +37,8 @@ incompatibilities.
 
 These DINOv3-only module commands are internal workflow helpers, not registered
 TAO launcher/API commands. They deliberately do not alter other model entrypoints.
-An approved DEFT release image is required; source-overlay tests do not establish
-that the stock image ships these modules. The optional cuVS indexed-search path
+Use a standard DS release image whose installed packages contain these modules;
+source-overlay tests do not establish that a given image ships them. The optional cuVS indexed-search path
 also needs TAO Infra approval and a tested image containing cuVS. Exact search
 does not require cuVS. Do not install dependencies at run startup.
 
@@ -210,6 +210,47 @@ the target output Parquet, `data.source_store_manifest` to the registered store,
 and `data.target_embedding_contract` to the generated contract; set the other
 checkpoint, training, payload-contract and output paths, then run `validate`.
 
+## Held-out benchmark isolation
+
+Declare held-out benchmark identities in `data.benchmark_acquisition_units`, a
+non-empty Parquet sidecar. It is required whenever `data.benchmark_manifest` is
+declared, even with evaluation disabled. Only an evaluator with
+`actions.evaluate.scope: diagnostic_replay` may omit it, and that run makes no
+held-out claim. A declared sidecar always activates isolation, whatever the
+scope. Without a held-out benchmark, omit both fields.
+
+`preflight` reports `"contracts": {"benchmark_isolation": 1}`. Older images
+accept the sidecar without screening the source pool, so before declaring a
+held-out benchmark, stop unless preflight reports version 1 or later.
+
+The sidecar contains `sample_id` and `data.acquisition_unit_column` (default
+`acquisition_unit_id`), and optionally `content_sha256` (64 hex digits, optional
+`sha256:` prefix). No DS producer writes per-row `content_sha256`:
+`register_embedding_store` hashes shard files, not rows. Declare it only when
+your embedding job writes it next to `path`; without it, isolation matches IDs
+and units only and does not catch a held-out sample copied under a new ID and
+unit. A row matches when any declared identity matches. IDs and
+units compare exactly and case-sensitively after surrounding whitespace is
+removed; hashes compare case-insensitively. Identity columns must hold strings
+or integers, not floats.
+
+Targets, parent history, every nonempty source shard, and every training
+manifest must carry each declared identity. Declaring `content_sha256` in the
+sidecar makes it mandatory on all of them. Missing, null, or empty identities
+fail closed. `validate` rejects contaminated targets and parent history and
+projects the benchmark onto the source shards before any stage runs; matching
+source rows join the search exclusions. Every `validate`, `run`, `resume` and
+`adopt-training` therefore reads the identity columns of every source shard. `materialize` rejects a contaminated
+cumulative manifest before writing `artifact.json` or `_SUCCESS`, and the
+controller rechecks cached, resumed, and adopted training inputs. Custom search
+adapters must honour these exclusions; otherwise materialization rejects the
+round. Use `sample_id` as the acquisition unit column only when each sample is
+its own acquisition unit. A source store whose `id_column` is not `sample_id`
+cannot use that column as the unit, because mined rows carry it as `sample_id`.
+
+Isolation trusts the declared identities. It does not recompute hashes, find
+semantic near-duplicates, or audit the data used to pretrain the base checkpoint.
+
 ## Select, search, and publish
 
 `select-grit` consumes a model-produced `grit_score`; Data Services does not
@@ -262,5 +303,6 @@ CUDA dependencies do not need to coexist. ANN underfill is
 `radius_exhausted` proof is required.
 
 `materialize` appends novel neighbors to an immutable cumulative Parquet
-training manifest. Images remain at their original `path` or archive
+training manifest. With `--benchmark-acquisition-units` and
+`--acquisition-unit-column`, it rejects held-out identities before publication. Images remain at their original `path` or archive
 `storage_type`/`path`/`member`; no symlinks or extracted copies are created.
