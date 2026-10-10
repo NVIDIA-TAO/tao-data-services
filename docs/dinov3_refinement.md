@@ -118,8 +118,10 @@ Prepare separate source and target input Parquets. Every row needs a unique
 `filepath` (an absolute local image filename), globally unique `sample_id`,
 `path` equal to `filepath`, and `storage_type: file`. Targets additionally need
 `task` and `role` (`query` or `reference`), including a reference population for
-each query task. Query/reference/source populations must follow your dataset
-split policy. The existing producer preserves these extra columns; duplicate
+each query task. Built-in GRIT needs, per task, more than `settling_k` (default
+50) references and more than the largest `view_ks` value (default 32) queries;
+`validate` checks this. Query/reference/source populations must follow your
+dataset split policy. The existing producer preserves these extra columns; duplicate
 filepaths would multiply rows in its metadata join and must be removed first.
 This producer reads individual image files, not tar/zip members; archive-backed
 datasets need an explicitly prepared file view before this step.
@@ -251,11 +253,44 @@ cannot use that column as the unit, because mined rows carry it as `sample_id`.
 Isolation trusts the declared identities. It does not recompute hashes, find
 semantic near-duplicates, or audit the data used to pretrain the base checkpoint.
 
+## Multi-task score adapter
+
+`grit-score` runs the built-in `dinov3 grit_score` action. DS ships no scorer
+for `multi-task-round-robin`: weakness depends on the customer's task heads and
+labels, so the customer supplies the adapter. Until `actions.score.command` and
+`implementation_files` name that adapter instead of the recipe placeholder
+`/path/to/customer_score_adapter`, every command that loads the config
+(`validate`, `plan`, `run`, `resume`, ...) rejects it.
+
+The command template may use `{checkpoint}`, `{target_manifest}`,
+`{output_dir}`, `{round}`, and any key of `actions.score.parameters` (the
+recipe uses `{head_config}`). The adapter writes `task_scores.parquet` with one
+row per target `(sample_id, task)`: a finite `weakness_score` (larger is
+weaker) and the target's `embedding`, unchanged. `score_commit.json` records:
+
+- `input_sha256` and `checkpoint_sha256`: copy `target_manifest.sha256` and
+  `checkpoint.sha256` from `{output_dir}/score_request.json`. For a checkpoint
+  directory, the controller hashes the model file inside it, not the directory.
+- `request_sha256`: the SHA-256 of `score_request.json`
+  (`TAO_REFINEMENT_REQUEST_SHA256`).
+- `entrypoint_sha256` and `implementation_sha256`: from
+  `{output_dir}/score_audit.json` (`TAO_REFINEMENT_ENTRYPOINT_SHA256`,
+  `TAO_REFINEMENT_IMPLEMENTATION_SHA256`).
+- `output_sha256`: the SHA-256 of `task_scores.parquet`.
+
+`_SUCCESS` contains the SHA-256 of `score_commit.json`. The controller rejects
+partial coverage, unknown tasks, changed embeddings, or a commit that does not
+match the current request.
+
 ## Select, search, and publish
 
 `select-grit` consumes a model-produced `grit_score`; Data Services does not
 implement the formula. `select-multitask` normalizes weakness within task,
-allocates equal per-task budgets, and deduplicates samples across tasks.
+splits the round budget by `task_weights` (equal by default), and deduplicates
+samples across tasks. With `policy: round_robin`, quota that a task cannot fill
+goes to tasks that still have candidates; with `policy: balanced`, it stays
+unfilled. The legacy `targets_per_task` caps each task and is not redistributed. The balanced training view repeats each task's mined rows up to the
+largest task; parent-history rows have no task and appear once.
 
 `exact-search` scans every declared embedding shard and applies cumulative
 exclusions plus two independent cosine-similarity thresholds. `min_similarity` is the

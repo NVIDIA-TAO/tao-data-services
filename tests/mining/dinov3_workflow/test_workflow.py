@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import warnings
 
 from omegaconf import OmegaConf
@@ -47,6 +48,7 @@ from nvidia_tao_ds.mining.dinov3.workflow.controller import (  # noqa: E402
     _verified_embedding_store,
 )
 from nvidia_tao_ds.mining.dinov3.workflow.config import (  # noqa: E402
+    SCORE_ADAPTER_PLACEHOLDER,
     canonical_digest,
     training_allocation,
 )
@@ -1070,6 +1072,32 @@ def test_metric_patience_stops_and_delivers_best_checkpoint(
     ).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("trained_rounds,expected", [([], 0), ([1], 1)])
+def test_early_stop_selects_the_last_trained_round(tmp_path: Path, trained_rounds, expected) -> None:
+    """A round that stops before training did not produce the delivered checkpoint."""
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    state = workflow._initialize()
+    for round_index in trained_rounds:
+        state["completed_stages"][f"round_{round_index:03d}/train"] = {"outputs": {}}
+    state["current_round"] = 2
+    workflow._stop(state, "no_novel_samples")
+    final_model = json.loads((tmp_path / "run" / "final_model.json").read_text(encoding="utf-8"))
+    assert state["selected_round"] == final_model["selected_round"] == expected
+
+
+@pytest.mark.parametrize("evaluate", [True, False])
+def test_report_shows_evaluation_scope_only_when_evaluation_runs(tmp_path: Path, evaluate) -> None:
+    value = _config(tmp_path, "grit_score").to_dict()
+    if not evaluate:
+        value["actions"]["evaluate"]["command"] = []
+        value["workflow"].pop("early_stopping", None)
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    workflow._render_report(workflow._initialize())
+    report = (tmp_path / "run" / "report.html").read_text(encoding="utf-8")
+    assert ("Scope: <strong>sealed_benchmark</strong>" in report) == evaluate
+    assert ("Evaluation is disabled for this run." in report) == (not evaluate)
+
+
 def test_early_stopping_requires_evaluation(tmp_path: Path) -> None:
     value = _config(tmp_path, "grit_score").to_dict()
     value["workflow"]["early_stopping"] = {
@@ -1117,7 +1145,7 @@ def test_resume_rejects_changed_source_shard(tmp_path: Path) -> None:
     }
     frame.to_parquet(source, index=False)
 
-    with pytest.raises(RuntimeError, match="Input data or checkpoint changed"):
+    with pytest.raises(RuntimeError, match=r"changed since the run was locked \(source.*\); fork the run"):
         workflow.execute()
 
 
@@ -2256,6 +2284,18 @@ def test_balanced_multitask_plan_preserves_quotas_and_balances_replay(
     assert selection["training_replay"].startswith("oversample each task")
 
 
+def test_legacy_targets_per_task_stays_a_per_task_cap(tmp_path: Path) -> None:
+    workflow = RefinementWorkflow(_config(tmp_path, "multi_task_round_robin"))
+    selection = workflow.config.plan()["approval_contract"]["selection"]
+    assert selection["unfilled_task_budget"] == "unused: targets_per_task caps each task"
+    calls = []
+    delegate = workflow.runner
+    workflow.runner = SimpleNamespace(run=lambda request: calls.append(request) or delegate.run(request))
+    workflow.execute()
+    select = next(request.command for request in calls if request.stage == "select_targets")
+    assert select[select.index("--per-task") + 1] == "1" and "--total" not in select
+
+
 def test_multitask_weight_validation_is_strict(tmp_path: Path) -> None:
     value = _config(tmp_path, "multi_task_round_robin").to_dict()
     value["multi_task"]["task_weights"] = {"unknown": 2.0}
@@ -2266,6 +2306,39 @@ def test_multitask_weight_validation_is_strict(tmp_path: Path) -> None:
     value["multi_task"]["task_weights"] = {"segmentation": 0.0}
     with pytest.raises(ValueError, match="finite and positive"):
         WorkflowConfig.from_dict(value)
+
+
+@pytest.mark.parametrize("field", ["command", "implementation_files"])
+def test_multitask_rejects_the_recipe_score_placeholder(tmp_path: Path, field: str) -> None:
+    """The shipped recipe has no scorer; it must fail before any stage, by name."""
+    value = _config(tmp_path, "multi_task_round_robin").to_dict()
+    value["actions"]["score"][field][0] = SCORE_ADAPTER_PLACEHOLDER
+    with pytest.raises(ValueError, match="DS ships no multi-task score adapter"):
+        WorkflowConfig.from_dict(value)
+
+
+@pytest.mark.parametrize("settings,roles,error", [
+    ({}, ["query", "query"],
+     "GRIT needs more than 50 reference and 32 query rows per task.*'aoi' has 0 references and 2 queries"),
+    ({"input_size": 256}, ["query", "query"], "GRIT input_size must be 512"),
+    ({"view_ks": []}, ["query", "query"], "view_ks must be a non-empty sequence"),
+    ({"unknown_knob": 1}, ["query", "query"], "Unknown native DINOv3 GRIT settings"),
+    ({}, ["reference", "reference"], "no (scoring identities|query rows)"),
+])
+def test_validate_and_plan_reject_grit_cohorts_the_scorer_cannot_use(tmp_path: Path, settings, roles, error) -> None:
+    """Built-in GRIT limits must fail before approval, not at the first GPU score stage."""
+    value = _config(tmp_path, "grit_score").to_dict()
+    value["actions"]["score"] = {
+        "command": ["dinov3", "grit_score", "-e", "{score_config}"],
+        "settings": {"neighbor_backend": "torch_exact", **settings},
+    }
+    targets = pd.read_parquet(value["data"]["target_manifest"])
+    targets["role"] = roles
+    targets.to_parquet(value["data"]["target_manifest"], index=False)
+    workflow = RefinementWorkflow(WorkflowConfig.from_dict(value))
+    for check in (lambda: workflow.validate(require_paths=True), workflow.plan):
+        with pytest.raises(ValueError, match=error):
+            check()
 
 
 def test_data_lock_accepts_actions_without_parameter_blocks(tmp_path: Path) -> None:
@@ -2632,6 +2705,74 @@ def test_retry_preserves_completed_round_inputs(
     assert request_path.read_bytes() == original_request
     assert request_path.stat().st_mtime_ns == original_mtime
     assert workflow.status()["round_inputs"]["1"] == original_inputs
+
+
+@pytest.mark.parametrize("outcome", ["error", "cancel"])
+def test_baseline_evaluation_is_a_recorded_stage(tmp_path: Path, outcome: str) -> None:
+    """A failed round-0 baseline is recorded; a cancel during it is not a crash."""
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    delegate = workflow.runner
+
+    class BaselineRunner:
+        def run(self, request: StageRequest) -> StageResult:
+            if request.round_index != 0:
+                return delegate.run(request)
+            if outcome == "cancel":
+                (tmp_path / "run" / "cancel.requested").touch()
+            return StageResult(
+                state="ERROR", client_job_id=request.client_job_id,
+                backend_ref="test", return_code=9, log_path=None, native_state="ERROR",
+            )
+
+    workflow.runner = BaselineRunner()
+    if outcome == "cancel":
+        assert workflow.execute()["status"] == "canceled"
+        # A canceled run still gets its report.
+        assert (tmp_path / "run" / "report.html").exists()
+        return
+    with pytest.raises(StageFailure, match="evaluate job .* ended in ERROR"):
+        workflow.execute()
+    state = workflow.status()
+    assert state["status"] == "failed"
+    assert state["failure"]["round"] == 0
+    assert state["failure"]["stage"] == "evaluate"
+    assert (tmp_path / "run" / "report.html").exists()
+
+
+def test_resume_keeps_the_recorded_failure_until_it_can_proceed(tmp_path: Path, monkeypatch) -> None:
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    state = workflow._initialize()
+    workflow.store.fail_stage(state, round_index=1, stage="train", error="original failure")
+
+    def reject(_state):
+        raise ValueError("checkpoint digest changed")
+
+    monkeypatch.setattr(workflow, "_validate_completed_training", reject)
+    with pytest.raises(ValueError, match="checkpoint digest changed"):
+        workflow.execute()
+    state = workflow.status()
+    assert state["status"] == "failed"
+    assert state["failure"]["error"] == "original failure"
+
+
+def test_canceled_stage_writes_a_terminal_event(tmp_path: Path) -> None:
+    workflow = RefinementWorkflow(_config(tmp_path, "grit_score"))
+    delegate = workflow.runner
+
+    class CancelingRunner:
+        def run(self, request: StageRequest) -> StageResult:
+            if request.stage == "score":
+                (tmp_path / "run" / "cancel.requested").touch()
+            return delegate.run(request)
+
+    workflow.runner = CancelingRunner()
+    assert workflow.execute()["status"] == "canceled"
+    events = [json.loads(line) for line in (tmp_path / "run" / "events.jsonl").read_text().splitlines()]
+    assert events[-1]["status"] == "canceled"
+
+
+def test_lock_change_message_names_type_only_changes() -> None:
+    assert workflow_controller._changed_keys({"a": {"b": 1}}, {"a": {"b": 1.0}}) == ["a.b"]
 
 
 def test_cancel_does_not_write_state_owned_by_running_controller(tmp_path: Path) -> None:
@@ -3370,6 +3511,18 @@ def test_sigterm_handoff_creates_workflow_cancellation_intent(
     assert signal.getsignal(signal.SIGTERM) is previous
 
 
+@pytest.mark.parametrize("command,status,code", [
+    ("run", "canceled", 143), ("resume", "canceling", 143), ("run", "complete", 0),
+])
+def test_run_exit_code_reports_cancellation(monkeypatch, capsys, command, status, code) -> None:
+    """A platform reading the exit code must not see a canceled run as success."""
+    workflow = SimpleNamespace(execute=lambda: {"status": status}, run_dir=Path("/unused"))
+    monkeypatch.setattr(workflow_cli, "_workflow", lambda _config: workflow)
+    monkeypatch.setattr(workflow_cli, "_execute_with_termination_handoff", lambda value: value.execute())
+    assert workflow_cli.main([command, "run.yaml"]) == code
+    assert ("cancellation is terminal" in capsys.readouterr().err) == bool(code)
+
+
 def test_external_runner_verbs_have_bounded_timeout(tmp_path: Path) -> None:
     request = StageRequest(
         client_job_id="timeout",
@@ -3596,8 +3749,10 @@ def test_controller_retains_job_after_mismatched_cancel_acknowledgement(
 @pytest.mark.parametrize("recipe,strategy", [
     ("grit_score", "grit_score"), ("multi_task_round_robin", "multi_task_round_robin"),
 ])
-def test_shipped_recipe_plan_and_all_command_placeholders(tmp_path, recipe, strategy):
+def test_shipped_recipe_plan_and_all_command_placeholders(tmp_path, monkeypatch, recipe, strategy):
     """Exercise both distributed recipes, not just their YAML syntax."""
+    # The two-row fixture is far below GRIT's cohort minimums, which have their own tests.
+    monkeypatch.setattr(workflow_controller, "_require_grit_cohorts", lambda *_: None)
     value = yaml.safe_load((WORKFLOW_ROOT / "recipes" / f"{recipe}.yaml").read_text())
     fixtures = _config(tmp_path, strategy).to_dict()
     for section in ("model", "data", "output"):

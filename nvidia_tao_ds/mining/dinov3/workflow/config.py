@@ -21,6 +21,8 @@ from .containers import configure_containers
 
 SCHEMA_VERSION = "1.0"
 STRATEGIES = {"grit_score", "multi_task_round_robin"}
+# The multi-task recipe's stand-in for the customer's scorer; DS ships none.
+SCORE_ADAPTER_PLACEHOLDER = "/path/to/customer_score_adapter"
 STOP_REASONS = {
     "metric_patience",
     "max_rounds",
@@ -471,6 +473,16 @@ class WorkflowConfig:
                 raise ValueError("actions.score.settings must be a mapping")
         elif not score.get("command"):
             raise ValueError("multi-task runs require actions.score.command")
+        elif SCORE_ADAPTER_PLACEHOLDER in map(
+            str, [*score["command"], *(score.get("implementation_files") or [])]
+        ):
+            raise ValueError(
+                f"actions.score still names the recipe placeholder {SCORE_ADAPTER_PLACEHOLDER}. "
+                "DS ships no multi-task score adapter: provide one that writes "
+                "task_scores.parquet, score_commit.json and _SUCCESS. Contract: the "
+                'tao-run-dinov3-ssl-deft skill, adapter-contracts.md "Task Scoring", '
+                'or tao-data-services docs/dinov3_refinement.md "Multi-task score adapter"'
+            )
         score.setdefault("parameters", {})
         if not isinstance(score["parameters"], dict):
             raise ValueError("actions.score.parameters must be a mapping")
@@ -795,6 +807,8 @@ class WorkflowConfig:
                 "unfilled_task_budget": (
                     "preserved"
                     if self.value["multi_task"]["policy"] == "balanced"
+                    else "unused: targets_per_task caps each task"
+                    if "targets_per_task" in self.value["multi_task"]
                     else "redistributed"
                 ),
                 "training_replay": (
