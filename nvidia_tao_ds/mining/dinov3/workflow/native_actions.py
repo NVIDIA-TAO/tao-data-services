@@ -115,17 +115,41 @@ def _write_text_atomic(path: Path, value: str) -> Path:
     return path
 
 
+# Cohort limits the built-in DINOv3 GRIT scorer enforces itself. The installed
+# TAO ``ExperimentConfig`` does not model these knobs (and older runtimes do not
+# model ``grit_score`` at all), so DS owns their names and defaults instead of
+# reading them off the composed spec.
+GRIT_SCORER_DEFAULTS: dict[str, Any] = {
+    "settling_k": 50,
+    "view_ks": [32],
+    "input_size": 512,
+}
+
+
 def grit_cohort_minimums(base_spec: str | Path, settings: dict[str, Any]) -> tuple[int, int]:
     """Return the reference and query counts each GRIT task must exceed.
 
     Values come from the composed spec plus ``actions.score.settings``, as the
     scorer will see them. The scorer accepts only a 512-pixel input size.
+
+    The built-in scorer's own limits (``settling_k``, ``view_ks``,
+    ``input_size``) are not part of the TAO ``ExperimentConfig`` schema, so they
+    are resolved from :data:`GRIT_SCORER_DEFAULTS` rather than from the spec.
     """
     _, spec = _experiment_spec(base_spec)
-    unknown = set(settings).difference(spec.grit_score.keys())
-    if unknown:
-        raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
-    grit = OmegaConf.merge(spec.grit_score, settings)
+    # A runtime that predates native grit_score models no scorer section at all.
+    # Only that runtime can tell us which knobs it accepts, so the unknown-name
+    # check runs when it is present and is skipped (not failed) when it is not.
+    modeled = "grit_score" in spec
+    spec_grit = spec.grit_score if modeled else OmegaConf.create({})
+    if modeled:
+        valid = set(spec_grit.keys()) | set(GRIT_SCORER_DEFAULTS)
+        unknown = set(settings).difference(valid)
+        if unknown:
+            raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
+    grit = OmegaConf.merge(
+        OmegaConf.create(GRIT_SCORER_DEFAULTS), spec_grit, settings
+    )
     if not grit.view_ks:
         raise ValueError("GRIT view_ks must be a non-empty sequence of positive integers")
     if int(grit.input_size) != 512:
@@ -152,7 +176,9 @@ def build_grit_spec(
         raise FileNotFoundError(f"DINOv3 checkpoint does not exist: {checkpoint_path}")
     spec.grit_score.checkpoint = str(checkpoint_path)
     spec.grit_score.base_spec = str(base_path)
-    valid = set(spec.grit_score.keys())
+    # Accept the same key universe validate() accepts, so a run that passed
+    # validation cannot be rejected again when its score spec is written.
+    valid = set(spec.grit_score.keys()) | set(GRIT_SCORER_DEFAULTS)
     unknown = set(settings).difference(valid)
     if unknown:
         raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
