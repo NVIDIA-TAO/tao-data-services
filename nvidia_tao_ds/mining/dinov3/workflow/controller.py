@@ -38,6 +38,7 @@ from .native_actions import (
     build_grit_spec,
     build_training_spec,
     finalize_training,
+    grit_cohort_minimums,
     resolved_training_batch_size,
 )
 from .state import ControllerBusy, StateStore
@@ -867,6 +868,38 @@ def _target_identity_set(
     return identities
 
 
+def _changed_keys(before: Any, after: Any, prefix: str = "") -> list[str]:
+    """Return the dotted paths whose values differ between two JSON documents."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        return [
+            changed
+            for key in sorted(set(before) | set(after), key=str)
+            for changed in _changed_keys(before.get(key), after.get(key), f"{prefix}{key}.")
+        ]
+    # Compare as the lock does, so 1 and 1.0 count as a change here too.
+    return [] if canonical_digest(before) == canonical_digest(after) else [prefix.rstrip(".") or "<root>"]
+
+
+def _require_grit_cohorts(path: Path, settling_k: int, max_view_k: int) -> None:
+    """Fail validation when a GRIT task cannot form its neighborhoods."""
+    frame = pq.read_table(path, columns=["task", "role"]).to_pandas()
+    counts = frame.astype(str).groupby(["task", "role"]).size().unstack(fill_value=0)
+    if not counts.get("query", pd.Series(dtype=int)).any():
+        raise ValueError("GRIT target manifest has no query rows")
+    short = [
+        f"{task!r} has {int(row.get('reference', 0))} references and {int(row.get('query', 0))} queries"
+        for task, row in counts.iterrows()
+        if row.get("query", 0) and (
+            row.get("reference", 0) <= settling_k or row["query"] <= max_view_k
+        )
+    ]
+    if short:
+        raise ValueError(
+            f"GRIT needs more than {settling_k} reference and {max_view_k} query rows per "
+            "task (actions.score.settings settling_k, view_ks): " + "; ".join(short)
+        )
+
+
 def _validate_score_embedding_binding(
     path: Path,
     strategy: str,
@@ -1081,6 +1114,7 @@ class RefinementWorkflow:
                 self.config.strategy,
                 expected_embedding_dim,
             )
+            self._require_scorable_grit_targets()
         parent = value["data"].get("previous_training_manifest")
         if (
             require_paths and
@@ -1116,12 +1150,28 @@ class RefinementWorkflow:
             ),
         }
 
+    def _require_scorable_grit_targets(self) -> None:
+        """Reject cohorts the built-in GRIT scorer would reject after GPU work starts."""
+        score = self.config.value["actions"]["score"]
+        if (
+            self.config.strategy == "grit_score" and
+            list(map(str, score["command"]))[:2] == ["dinov3", "grit_score"]
+        ):
+            _require_grit_cohorts(
+                Path(self.config.value["data"]["target_manifest"]).expanduser(),
+                *grit_cohort_minimums(
+                    self.config.value["training"]["base_spec"], score.get("settings", {})
+                ),
+            )
+
     def plan(
         self, *, _cache_source_verification: bool = False
     ) -> dict[str, Any]:
         """Describe the resolved stages, resources and stopping policy."""
         if not _cache_source_verification:
             self._source_store_verification = None
+        # Approval works from the plan, so it must not show a run that cannot score.
+        self._require_scorable_grit_targets()
         plan = self.config.plan()
         data = self.config.value["data"]
 
@@ -1763,7 +1813,12 @@ class RefinementWorkflow:
         if data_lock_path.exists():
             existing_data_lock = json.loads(data_lock_path.read_text(encoding="utf-8"))
             if canonical_digest(existing_data_lock) != canonical_digest(requested_data_lock):
-                raise RuntimeError("Input data or checkpoint changed; fork the run")
+                changed = _changed_keys(existing_data_lock, requested_data_lock)
+                raise RuntimeError(
+                    "Input data, checkpoint or implementation changed since the run was "
+                    f"locked ({', '.join(changed[:5])}{', ...' if len(changed) > 5 else ''}); "
+                    "fork the run"
+                )
         else:
             _atomic_json(data_lock_path, requested_data_lock)
         release = {
@@ -1998,6 +2053,8 @@ class RefinementWorkflow:
                 "canceling" if latest.get("active_jobs") else "canceled"
             )
             self.store.save(latest)
+            self.store.append_event(latest, round_index=round_index, stage=stage,
+                                    status=latest["status"], extra={"job": asdict(result)})
             raise RunCanceled(f"Cancellation requested for {state['run_id']}")
         if result.state != "COMPLETE":
             raise StageFailure(
@@ -2321,14 +2378,19 @@ class RefinementWorkflow:
             ]
         else:
             multitask = self.config.value["multi_task"]
-            total = sum(multitask_budgets(multitask).values())
+            # Legacy targets_per_task is a per-task cap; targets_per_round is a
+            # round total whose unfilled quota round_robin redistributes.
+            budget = (
+                ["--per-task", str(int(multitask["targets_per_task"]))]
+                if "targets_per_task" in multitask
+                else ["--total", str(sum(multitask_budgets(multitask).values()))]
+            )
             command = [
                 *data_command,
                 "select-multitask",
                 "--scores",
                 str(scores),
-                "--total",
-                str(total),
+                *budget,
             ]
             if multitask.get("task_weights"):
                 command.extend(
@@ -3558,7 +3620,17 @@ class RefinementWorkflow:
         selected_manifest = tracker.get(
             "best_training_manifest", state["current_training_manifest"]
         )
-        selected_round = tracker.get("best_round", state["current_round"])
+        # current_checkpoint comes from the last trained round, not the round
+        # that stopped; 0 means the base checkpoint.
+        last_trained = max(
+            (
+                int(key.split("/")[0].removeprefix("round_"))
+                for key in state["completed_stages"]
+                if key.startswith("round_") and key.endswith("/train")
+            ),
+            default=0,
+        )
+        selected_round = tracker.get("best_round", last_trained)
         state["status"] = "complete"
         state["stop_reason"] = reason
         state["selected_checkpoint"] = selected_checkpoint
@@ -3752,38 +3824,64 @@ class RefinementWorkflow:
             if early_stopping_config
             else "Disabled; terminal delivery uses the latest checkpoint."
         )
-        document = f"""<!doctype html><html><head><meta charset="utf-8">\n<title>DINOv3 SSL DEFT Report</title><style>\nbody{{font:14px Arial,sans-serif;max-width:1400px;margin:32px auto;color:#202124;line-height:1.45}}\nh1{{font-size:28px;margin-bottom:4px}}h2{{font-size:19px;margin-top:30px;border-bottom:2px solid #333;padding-bottom:5px}}\n.summary{{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));border:1px solid #bbb}}\n.summary div{{padding:12px;border-right:1px solid #bbb}}.summary div:last-child{{border-right:0}}\n.label{{font-size:11px;text-transform:uppercase;color:#666}}.value{{font-size:18px;font-weight:600}}\ntable{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}}\nth{{background:#f1f3f4}}code{{font-size:12px;overflow-wrap:anywhere}}.note{{color:#555}}@media print{{body{{margin:10mm}}}}\n</style></head><body>\n<h1>DINOv3 SSL DEFT</h1><p class="note">Run <code>{html.escape(state['run_id'])}</code> using <code>{html.escape(self.config.strategy)}</code>.</p>\n<div class="summary"><div><span class="label">Status</span><br><span class="value">{html.escape(state['status'])}</span></div>\n<div><span class="label">Stop reason</span><br><span class="value">{html.escape(str(state.get('stop_reason')))}</span></div>\n<div><span class="label">Completed rounds</span><br><span class="value">{len(state.get('completed_rounds', {}))}</span></div>\n<div><span class="label">Retries / failures</span><br><span class="value">{retry_count} / {len(failures)}</span></div>\n<div><span class="label">Checkpoint policy</span><br><span class="value">{html.escape(self.config.value['training']['checkpoint_policy'])}</span></div>\n<div><span class="label">Selected round</span><br><span class="value">{html.escape(str(state.get('selected_round', early_stopping.get('best_round', '-'))))}</span></div></div>\n<h2>Round Summary</h2><table><thead><tr><th>Round</th><th>Weak targets</th><th>Mined rows</th><th>Similarity min / median / max</th><th>Novel rows</th><th>Replay removed</th><th>Training</th><th>Evaluation</th></tr></thead><tbody>{''.join(round_rows)}</tbody></table>\n<h2>Task Distribution</h2><table><thead><tr><th>Round</th><th>Task</th><th>Weak targets</th><th>Mined rows</th></tr></thead><tbody>{''.join(distribution_rows)}</tbody></table>\n<h2>Evaluation Metrics</h2><p class="note">Round 0 is the immutable base checkpoint. Gain is direction-normalized versus that baseline. Scope: <strong>{html.escape(self.config.value['actions']['evaluate']['scope'])}</strong>. Diagnostic replay is not held-out evidence.</p><table><thead><tr><th>Round</th><th>Task</th><th>Metric</th><th>Value</th><th>Gain vs base</th><th>Direction</th><th>Samples</th></tr></thead><tbody>{''.join(metric_rows)}</tbody></table>\n<h2>Early Stopping</h2><p class="note">{html.escape(early_stopping_note)}</p><table><thead><tr><th>Round</th><th>Score</th><th>Components</th><th>Rounds without improvement</th><th>Stop</th></tr></thead><tbody>{''.join(early_stopping_rows)}</tbody></table>\n<h2>Failures And Retries</h2><table><thead><tr><th>Round</th><th>Stage</th><th>Time</th><th>Error</th></tr></thead><tbody>{''.join(failure_rows)}</tbody></table>\n<h2>Artifact Trace</h2><table><thead><tr><th>Stage</th><th>Completed</th><th>Outputs</th></tr></thead><tbody>{''.join(stage_rows)}</tbody></table></body></html>"""
+        evaluate = self.config.value["actions"]["evaluate"]
+        # The scope defaults to sealed_benchmark; show it only when evaluation runs.
+        evaluation_note = (
+            "Round 0 is the immutable base checkpoint. Gain is direction-normalized versus "
+            f"that baseline. Scope: <strong>{html.escape(evaluate['scope'])}</strong>. "
+            "Diagnostic replay is not held-out evidence."
+            if evaluate["command"] else "Evaluation is disabled for this run."
+        )
+        document = f"""<!doctype html><html><head><meta charset="utf-8">\n<title>DINOv3 SSL DEFT Report</title><style>\nbody{{font:14px Arial,sans-serif;max-width:1400px;margin:32px auto;color:#202124;line-height:1.45}}\nh1{{font-size:28px;margin-bottom:4px}}h2{{font-size:19px;margin-top:30px;border-bottom:2px solid #333;padding-bottom:5px}}\n.summary{{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));border:1px solid #bbb}}\n.summary div{{padding:12px;border-right:1px solid #bbb}}.summary div:last-child{{border-right:0}}\n.label{{font-size:11px;text-transform:uppercase;color:#666}}.value{{font-size:18px;font-weight:600}}\ntable{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}}\nth{{background:#f1f3f4}}code{{font-size:12px;overflow-wrap:anywhere}}.note{{color:#555}}@media print{{body{{margin:10mm}}}}\n</style></head><body>\n<h1>DINOv3 SSL DEFT</h1><p class="note">Run <code>{html.escape(state['run_id'])}</code> using <code>{html.escape(self.config.strategy)}</code>.</p>\n<div class="summary"><div><span class="label">Status</span><br><span class="value">{html.escape(state['status'])}</span></div>\n<div><span class="label">Stop reason</span><br><span class="value">{html.escape(str(state.get('stop_reason')))}</span></div>\n<div><span class="label">Completed rounds</span><br><span class="value">{len(state.get('completed_rounds', {}))}</span></div>\n<div><span class="label">Retries / failures</span><br><span class="value">{retry_count} / {len(failures)}</span></div>\n<div><span class="label">Checkpoint policy</span><br><span class="value">{html.escape(self.config.value['training']['checkpoint_policy'])}</span></div>\n<div><span class="label">Selected round</span><br><span class="value">{html.escape(str(state.get('selected_round', early_stopping.get('best_round', '-'))))}</span></div></div>\n<h2>Round Summary</h2><table><thead><tr><th>Round</th><th>Weak targets</th><th>Mined rows</th><th>Similarity min / median / max</th><th>Novel rows</th><th>Replay removed</th><th>Training</th><th>Evaluation</th></tr></thead><tbody>{''.join(round_rows)}</tbody></table>\n<h2>Task Distribution</h2><table><thead><tr><th>Round</th><th>Task</th><th>Weak targets</th><th>Mined rows</th></tr></thead><tbody>{''.join(distribution_rows)}</tbody></table>\n<h2>Evaluation Metrics</h2><p class="note">{evaluation_note}</p><table><thead><tr><th>Round</th><th>Task</th><th>Metric</th><th>Value</th><th>Gain vs base</th><th>Direction</th><th>Samples</th></tr></thead><tbody>{''.join(metric_rows)}</tbody></table>\n<h2>Early Stopping</h2><p class="note">{html.escape(early_stopping_note)}</p><table><thead><tr><th>Round</th><th>Score</th><th>Components</th><th>Rounds without improvement</th><th>Stop</th></tr></thead><tbody>{''.join(early_stopping_rows)}</tbody></table>\n<h2>Failures And Retries</h2><table><thead><tr><th>Round</th><th>Stage</th><th>Time</th><th>Error</th></tr></thead><tbody>{''.join(failure_rows)}</tbody></table>\n<h2>Artifact Trace</h2><table><thead><tr><th>Stage</th><th>Completed</th><th>Outputs</th></tr></thead><tbody>{''.join(stage_rows)}</tbody></table></body></html>"""
         temporary = self.run_dir / "report.html.tmp"
         temporary.write_text(document, encoding="utf-8")
         temporary.replace(self.run_dir / "report.html")
 
     def execute(self) -> dict[str, Any]:
-        # Each terminal state exits explicitly; keep the state-machine boundaries visible.
-        # pylint: disable=too-many-return-statements
         """Run or resume until a scientific stop condition is reached."""
         with _snapshot_cache(), self.store.controller_lock():
-            # Acquire ownership before the expensive inventory scan. Reuse this
-            # invocation's verified source inventory when constructing data.lock.
-            self.validate(require_paths=True)
-            state = self._initialize()
-            if state["status"] in {"complete", "canceled"}:
-                if state["status"] == "complete":
-                    self._validate_completed_training(state)
-                return state
-            if (
-                state["status"] == "canceling" or
-                (self.run_dir / "cancel.requested").exists()
-            ):
-                state, _ = self._reconcile_cancellation(state)
-                return state
-            if state["status"] == "failed":
-                state["status"] = "running"
-                state.pop("failure", None)
-                self.store.save(state)
-            # Recheck every committed checkpoint before any resumed downstream
-            # stage can consume it.
-            self._validate_completed_training(state)
-            if self.config.value["actions"]["evaluate"]["command"]:
+            state = self._execute_locked()
+            if state.get("status") == "canceled":
+                # Every terminal run gets a report, canceled ones included.
+                self._render_report_or_record(state, root_failure="canceled")
+            return state
+
+    def _execute_locked(self) -> dict[str, Any]:
+        # Each terminal state exits explicitly; keep the state-machine boundaries visible.
+        # pylint: disable=too-many-return-statements
+        # Acquire ownership before the expensive inventory scan. Reuse this
+        # invocation's verified source inventory when constructing data.lock.
+        self.validate(require_paths=True)
+        state = self._initialize()
+        if state["status"] in {"complete", "canceled"}:
+            if state["status"] == "complete":
+                self._validate_completed_training(state)
+            return state
+        if (
+            state["status"] == "canceling" or
+            (self.run_dir / "cancel.requested").exists()
+        ):
+            state, _ = self._reconcile_cancellation(state)
+            return state
+        # Recheck every committed checkpoint before any resumed downstream
+        # stage can consume it.
+        self._validate_completed_training(state)
+        configured_start = int(self.config.value["workflow"]["start_round"])
+        if configured_start > 1 and not state.get("adopted_partial_round"):
+            adopted_key = f"round_{configured_start:03d}/train"
+            if adopted_key not in state.get("completed_stages", {}):
+                raise RuntimeError(
+                    "Continuation training has not been adopted; run "
+                    "adopt-training before run or resume"
+                )
+        # Clear a recorded failure only once resume can actually proceed.
+        if state["status"] == "failed":
+            state["status"] = "running"
+            state.pop("failure", None)
+            self.store.save(state)
+        if self.config.value["actions"]["evaluate"]["command"]:
+            # Round 0 is a stage like any other: record failure and honor cancel.
+            try:
                 baseline_metrics = self._evaluate(
                     state,
                     0,
@@ -3801,93 +3899,44 @@ class RefinementWorkflow:
                     training_manifest=None,
                     metrics_path=baseline_metrics,
                 )
-            configured_start = int(self.config.value["workflow"]["start_round"])
-            if configured_start > 1 and not state.get("adopted_partial_round"):
-                adopted_key = f"round_{configured_start:03d}/train"
-                if adopted_key not in state.get("completed_stages", {}):
-                    raise RuntimeError(
-                        "Continuation training has not been adopted; run "
-                        "adopt-training before run or resume"
-                    )
-            max_rounds = int(self.config.value["workflow"]["max_rounds"])
-            current_round = int(state["current_round"])
-            current_round_key = f"round_{current_round:03d}"
-            start_round = (
-                current_round + 1
-                if current_round and
-                current_round_key in state.get("completed_rounds", {})
-                else max(current_round, configured_start)
-            )
-            if state.get("early_stopping", {}).get("should_stop"):
-                self._stop(state, "metric_patience")
-                return state
-            for round_index in range(start_round, max_rounds + 1):
-                if (self.run_dir / "cancel.requested").exists():
-                    state["status"] = "canceled"
-                    self.store.save(state)
-                    return state
-                state["current_round"] = round_index
-                # Stage commits advance the current model/manifest/persistence.
-                # Retrying this round must still reconstruct its original inputs.
-                state.setdefault("round_inputs", {}).setdefault(
-                    str(round_index),
-                    {
-                        "current_checkpoint": state["current_checkpoint"],
-                        "current_training_manifest": state["current_training_manifest"],
-                        "persistent_targets": json.loads(json.dumps(state["persistent_targets"])),
-                    },
-                )
+            except RunCanceled:
+                return self.store.load()
+            except Exception as exc:
+                self._record_failure(state, 0, exc)
+                raise
+        max_rounds = int(self.config.value["workflow"]["max_rounds"])
+        current_round = int(state["current_round"])
+        current_round_key = f"round_{current_round:03d}"
+        start_round = (
+            current_round + 1
+            if current_round and
+            current_round_key in state.get("completed_rounds", {})
+            else max(current_round, configured_start)
+        )
+        if state.get("early_stopping", {}).get("should_stop"):
+            self._stop(state, "metric_patience")
+            return state
+        for round_index in range(start_round, max_rounds + 1):
+            if (self.run_dir / "cancel.requested").exists():
+                state["status"] = "canceled"
                 self.store.save(state)
-                round_dir = self.run_dir / "rounds" / f"round_{round_index:03d}"
-                try:
-                    if int(state.get("adopted_partial_round", -1)) == round_index:
-                        checkpoint = Path(state["current_checkpoint"])
-                        metrics = self._evaluate(
-                            state, round_index, round_dir, checkpoint
-                        )
-                        should_stop = self._record_early_stopping(
-                            state,
-                            round_index=round_index,
-                            checkpoint=checkpoint,
-                            training_manifest=state.get(
-                                "current_training_manifest"
-                            ),
-                            metrics_path=metrics,
-                        )
-                        self.store.complete_round(state, round_index=round_index)
-                        state.pop("adopted_partial_round", None)
-                        self.store.save(state)
-                        self._render_report(state)
-                        if should_stop:
-                            self._stop(state, "metric_patience")
-                            return state
-                        continue
-                    scores = self._score(state, round_index, round_dir)
-                    targets = self._select(state, round_index, round_dir, scores)
-                    if pd.read_parquet(targets, pre_buffer=False).empty:
-                        self._stop(state, "no_actionable_targets")
-                        return state
-                    neighbors, search = self._search(
-                        state, round_index, round_dir, targets
-                    )
-                    if pd.read_parquet(neighbors, pre_buffer=False).empty:
-                        reason = _empty_search_stop_reason(search)
-                        self._stop(state, reason)
-                        return state
-                    _, training_view = self._materialize(
-                        state, round_index, round_dir, neighbors, targets
-                    )
-                    materialize_artifact = json.loads(
-                        (round_dir / "materialize" / "artifact.json").read_text(
-                            encoding="utf-8"
-                        )
-                    )
-                    if int(materialize_artifact["payload"].get("delta_rows", -1)) == 0:
-                        self._stop(state, "no_novel_samples")
-                        return state
-                    checkpoint = self._train(
-                        state, round_index, round_dir, training_view
-                    )
+                return state
+            state["current_round"] = round_index
+            # Stage commits advance the current model/manifest/persistence.
+            # Retrying this round must still reconstruct its original inputs.
+            state.setdefault("round_inputs", {}).setdefault(
+                str(round_index),
+                {
+                    "current_checkpoint": state["current_checkpoint"],
+                    "current_training_manifest": state["current_training_manifest"],
+                    "persistent_targets": json.loads(json.dumps(state["persistent_targets"])),
+                },
+            )
+            self.store.save(state)
+            round_dir = self.run_dir / "rounds" / f"round_{round_index:03d}"
+            try:
+                if int(state.get("adopted_partial_round", -1)) == round_index:
+                    checkpoint = Path(state["current_checkpoint"])
                     metrics = self._evaluate(
                         state, round_index, round_dir, checkpoint
                     )
@@ -3895,37 +3944,91 @@ class RefinementWorkflow:
                         state,
                         round_index=round_index,
                         checkpoint=checkpoint,
-                        training_manifest=state.get("current_training_manifest"),
+                        training_manifest=state.get(
+                            "current_training_manifest"
+                        ),
                         metrics_path=metrics,
                     )
                     self.store.complete_round(state, round_index=round_index)
+                    state.pop("adopted_partial_round", None)
+                    self.store.save(state)
                     self._render_report(state)
                     if should_stop:
                         self._stop(state, "metric_patience")
                         return state
-                except RunCanceled:
-                    return self.store.load()
-                except Exception as exc:
-                    self.store.fail_stage(
-                        state,
-                        round_index=round_index,
-                        stage=exc.stage if isinstance(exc, StageFailure) else "controller",
-                        error=str(exc),
+                    continue
+                scores = self._score(state, round_index, round_dir)
+                targets = self._select(state, round_index, round_dir, scores)
+                if pd.read_parquet(targets, pre_buffer=False).empty:
+                    self._stop(state, "no_actionable_targets")
+                    return state
+                neighbors, search = self._search(
+                    state, round_index, round_dir, targets
+                )
+                if pd.read_parquet(neighbors, pre_buffer=False).empty:
+                    reason = _empty_search_stop_reason(search)
+                    self._stop(state, reason)
+                    return state
+                _, training_view = self._materialize(
+                    state, round_index, round_dir, neighbors, targets
+                )
+                materialize_artifact = json.loads(
+                    (round_dir / "materialize" / "artifact.json").read_text(
+                        encoding="utf-8"
                     )
-                    try:
-                        self._render_report(state)
-                    except Exception as report_error:  # recovery must preserve root cause
-                        _atomic_json(
-                            self.run_dir / "report_error.json",
-                            {
-                                "schema_version": "1.0",
-                                "error": str(report_error),
-                                "root_failure": str(exc),
-                            },
-                        )
-                    raise
-            self._stop(state, "max_rounds")
-            return state
+                )
+                if int(materialize_artifact["payload"].get("delta_rows", -1)) == 0:
+                    self._stop(state, "no_novel_samples")
+                    return state
+                checkpoint = self._train(
+                    state, round_index, round_dir, training_view
+                )
+                metrics = self._evaluate(
+                    state, round_index, round_dir, checkpoint
+                )
+                should_stop = self._record_early_stopping(
+                    state,
+                    round_index=round_index,
+                    checkpoint=checkpoint,
+                    training_manifest=state.get("current_training_manifest"),
+                    metrics_path=metrics,
+                )
+                self.store.complete_round(state, round_index=round_index)
+                self._render_report(state)
+                if should_stop:
+                    self._stop(state, "metric_patience")
+                    return state
+            except RunCanceled:
+                return self.store.load()
+            except Exception as exc:
+                self._record_failure(state, round_index, exc)
+                raise
+        self._stop(state, "max_rounds")
+        return state
+
+    def _record_failure(self, state: dict[str, Any], round_index: int, exc: Exception) -> None:
+        """Persist a failed stage and its report before the error propagates."""
+        self.store.fail_stage(
+            state,
+            round_index=round_index,
+            stage=exc.stage if isinstance(exc, StageFailure) else "controller",
+            error=str(exc),
+        )
+        self._render_report_or_record(state, root_failure=str(exc))
+
+    def _render_report_or_record(self, state: dict[str, Any], *, root_failure: str) -> None:
+        """Render the report; a report error must not hide the terminal outcome."""
+        try:
+            self._render_report(state)
+        except Exception as report_error:  # recovery must preserve root cause
+            _atomic_json(
+                self.run_dir / "report_error.json",
+                {
+                    "schema_version": "1.0",
+                    "error": str(report_error),
+                    "root_failure": root_failure,
+                },
+            )
 
     def status(self) -> dict[str, Any]:
         """Read the durable workflow status without executing stages."""

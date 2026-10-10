@@ -18,7 +18,7 @@ from typing import Any
 from omegaconf import OmegaConf
 import pyarrow.parquet as pq
 
-from ..contracts import canonical_digest, write_json_atomic
+from ..contracts import canonical_digest, publish_mode, write_json_atomic
 from .snapshots import file_sha256
 
 
@@ -80,6 +80,7 @@ def _write_yaml_atomic(path: Path, config) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
@@ -102,6 +103,7 @@ def _write_text_atomic(path: Path, value: str) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
@@ -111,6 +113,24 @@ def _write_text_atomic(path: Path, value: str) -> Path:
     finally:
         temporary.unlink(missing_ok=True)
     return path
+
+
+def grit_cohort_minimums(base_spec: str | Path, settings: dict[str, Any]) -> tuple[int, int]:
+    """Return the reference and query counts each GRIT task must exceed.
+
+    Values come from the composed spec plus ``actions.score.settings``, as the
+    scorer will see them. The scorer accepts only a 512-pixel input size.
+    """
+    _, spec = _experiment_spec(base_spec)
+    unknown = set(settings).difference(spec.grit_score.keys())
+    if unknown:
+        raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
+    grit = OmegaConf.merge(spec.grit_score, settings)
+    if not grit.view_ks:
+        raise ValueError("GRIT view_ks must be a non-empty sequence of positive integers")
+    if int(grit.input_size) != 512:
+        raise ValueError(f"GRIT input_size must be 512, got {grit.input_size}")
+    return int(grit.settling_k), max(map(int, grit.view_ks))
 
 
 def build_grit_spec(

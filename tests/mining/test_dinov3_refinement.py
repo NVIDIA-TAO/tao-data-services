@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import numpy as np
@@ -611,6 +612,34 @@ def test_balanced_multitask_preserves_inactive_task_budget() -> None:
         preserve_unfilled_budget=True,
     )
     assert selected.groupby("task").size().to_dict() == {"x": 4}
+
+
+@pytest.mark.parametrize("preserve,expected", [(False, {"a": 2, "b": 8}), (True, {"a": 2, "b": 5})])
+def test_round_robin_redistributes_quota_a_short_task_cannot_fill(preserve, expected) -> None:
+    """round_robin gives a short task's unused quota away; balanced keeps it unfilled."""
+    frame = pd.DataFrame({
+        "sample_id": [f"a-{index}" for index in range(2)] + [f"b-{index}" for index in range(100)],
+        "task": ["a"] * 2 + ["b"] * 100,
+        "weakness_score": list(range(2)) + list(range(100)),
+    })
+    selected = select_multitask_targets(
+        frame, total=10, configured_tasks=["a", "b"], preserve_unfilled_budget=preserve,
+    )
+    assert selected.groupby("task").size().to_dict() == expected
+    assert not selected["sample_id"].duplicated().any()
+
+
+def test_redistributed_quota_follows_weights_and_per_task_stays_a_cap() -> None:
+    frame = pd.DataFrame({
+        "sample_id": [f"{task}-{index}" for task, size in (("a", 2), ("b", 100), ("c", 100))
+                      for index in range(size)],
+        "task": ["a"] * 2 + ["b"] * 100 + ["c"] * 100,
+        "weakness_score": list(range(2)) + list(range(100)) + list(range(100)),
+    })
+    weighted = select_multitask_targets(frame, total=100, task_weights={"a": 1.0, "b": 1.0, "c": 8.0})
+    assert weighted.groupby("task").size().to_dict() == {"a": 2, "b": 11, "c": 87}
+    capped = select_multitask_targets(frame, per_task=5)
+    assert capped.groupby("task").size().to_dict() == {"a": 2, "b": 5, "c": 5}
 
 
 def test_multitask_weights_reject_unknown_or_nonpositive_tasks() -> None:
@@ -1603,6 +1632,55 @@ def test_materialize_publishes_task_balanced_training_view(tmp_path: Path) -> No
     assert result["payload"]["balance"]["policy"] == (
         "oversample_each_task_to_largest_group_v1"
     )
+
+
+def test_balanced_view_trains_parent_history_once(tmp_path: Path) -> None:
+    """A parent manifest has no task provenance; it must not stop round 1."""
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame({"sample_id": ["query-x", "query-y"], "task": ["x", "y"]}).to_parquet(queries, index=False)
+    parent = tmp_path / "parent.parquet"
+    pd.DataFrame({
+        "sample_id": ["p1", "p2"], "storage_type": ["file"] * 2,
+        "path": [str(tmp_path / f"{name}.jpg") for name in ("p1", "p2")],
+    }).to_parquet(parent, index=False)
+    delta = tmp_path / "delta.parquet"
+    pd.DataFrame({
+        "sample_id": ["a", "b", "c"], "query_id": ["query-x", "query-x", "query-y"],
+        "storage_type": ["file"] * 3, "path": [str(tmp_path / f"{name}.jpg") for name in "abc"],
+    }).to_parquet(delta, index=False)
+
+    result = materialize_manifest(
+        delta_path=delta, previous_path=parent, query_path=queries,
+        balance_column="query_task", output_dir=tmp_path / "balanced",
+    )
+
+    training = pd.read_parquet(tmp_path / "balanced" / "balanced_training_manifest.parquet")
+    parents = training.loc[training["query_task"].isnull()]
+    assert sorted(parents["sample_id"]) == ["p1", "p2"]
+    assert parents["replay_repeat"].eq(0).all()
+    assert training.groupby("query_task").size().to_dict() == {"x": 2, "y": 2}
+    assert result["payload"]["balance"]["unattributed_rows"] == 2
+    assert result["payload"]["training_view_rows"] == 6
+
+
+def test_published_outputs_follow_the_umask(tmp_path: Path) -> None:
+    """A platform collecting the shared results directory must be able to read them."""
+    queries = tmp_path / "queries.parquet"
+    pd.DataFrame({"sample_id": ["query-x"], "task": ["x"]}).to_parquet(queries, index=False)
+    delta = tmp_path / "delta.parquet"
+    pd.DataFrame({
+        "sample_id": ["a"], "query_id": ["query-x"], "storage_type": ["file"],
+        "path": [str(tmp_path / "a.jpg")],
+    }).to_parquet(delta, index=False)
+    previous = os.umask(0o022)
+    try:
+        materialize_manifest(delta_path=delta, query_path=queries, balance_column="query_task",
+                             output_dir=tmp_path / "out")
+    finally:
+        os.umask(previous)
+    for name in ("training_manifest.parquet", "balanced_training_manifest.parquet",
+                 "artifact.json", "_SUCCESS"):
+        assert stat.S_IMODE((tmp_path / "out" / name).stat().st_mode) == 0o644, name
 
 
 def test_register_store_rejects_duplicate_identity(tmp_path: Path) -> None:

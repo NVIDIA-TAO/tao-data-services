@@ -11,12 +11,13 @@ from unittest.mock import Mock
 import pytest
 import yaml
 
-from nvidia_tao_ds.mining.dinov3.workflow import cli
+from nvidia_tao_ds.mining.dinov3.workflow import WorkflowConfig, cli
+from nvidia_tao_ds.mining.dinov3.workflow.config import SCORE_ADAPTER_PLACEHOLDER
 from nvidia_tao_ds.mining.dinov3.workflow.containers import resolve_image
 
 
 @pytest.mark.parametrize("recipe", ["grit-score", "multi-task-round-robin"])
-def test_init_uses_packaged_recipes_without_bank(tmp_path, monkeypatch, recipe):
+def test_init_uses_packaged_recipes_without_bank(tmp_path, monkeypatch, capsys, recipe):
     monkeypatch.delenv("TAO_SKILL_BANK_PATH", raising=False)
     target = tmp_path / "run.yaml"
     assert cli.main(["init", "--recipe", recipe, "--output", str(target)]) == 0
@@ -24,8 +25,17 @@ def test_init_uses_packaged_recipes_without_bank(tmp_path, monkeypatch, recipe):
     assert value["execution"]["backend"] == "local"
     assert "container_images" not in value["execution"]
     assert value["actions"]["train"]["resources"] == {"nodes": 1, "gpus_per_node": 1}
+    output = capsys.readouterr()
+    assert output.out.strip() == str(target.resolve())
     if recipe == "grit-score":
         assert value["actions"]["score"]["settings"]["neighbor_backend"] == "torch_exact"
+        assert not output.err
+    else:
+        # The recipe ships a placeholder scorer; init says so and validation rejects it.
+        assert value["actions"]["score"]["command"][0] == SCORE_ADAPTER_PLACEHOLDER
+        assert "needs your own score adapter" in output.err
+        with pytest.raises(ValueError, match="DS ships no multi-task score adapter"):
+            WorkflowConfig.from_dict(value)
     with pytest.raises(ValueError, match="overwrite"):
         cli.main(["init", "--recipe", recipe, "--output", str(target)])
 

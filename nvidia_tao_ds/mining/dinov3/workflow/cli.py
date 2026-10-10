@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import shutil
 import signal
+import sys
 import tempfile
 
 
@@ -22,6 +23,8 @@ from .execution import LocalRunner, StageRequest
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+# 128 + SIGTERM: run/resume ended because the run was canceled.
+CANCELED_EXIT_CODE = 143
 RECIPES = {
     "grit-score": PACKAGE_ROOT / "recipes" / "grit_score.yaml",
     "multi-task-round-robin": PACKAGE_ROOT / "recipes" / "multi_task_round_robin.yaml",
@@ -157,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"Refusing to overwrite {destination}")
         shutil.copyfile(RECIPES[args.recipe], destination)
         print(destination.resolve())
+        if args.recipe == "multi-task-round-robin":
+            # stdout stays the path alone; scripts read it.
+            print("multi-task-round-robin needs your own score adapter in actions.score. Contract: "
+                  'the tao-run-dinov3-ssl-deft skill, adapter-contracts.md "Task Scoring".', file=sys.stderr)
         return 0
     if args.command in {"validate", "plan", "adopt-training", "run", "resume"}:
         workflow = _workflow(args.config)
@@ -169,6 +176,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = _execute_with_termination_handoff(workflow)
         print(json.dumps(result, indent=2, sort_keys=True))
+        if args.command in {"run", "resume"} and result.get("status") in {"canceled", "canceling"}:
+            # A platform reading the exit code must not record a canceled run as success.
+            print(f"Run {result.get('status')}; cancellation is terminal for this run directory.",
+                  file=sys.stderr)
+            return CANCELED_EXIT_CODE
         return 0
 
     config_path = _config_for_run(args)
