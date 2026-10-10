@@ -245,6 +245,10 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
     spec.write_text("model: {}\ndataset:\n  batch_size: 2\n")
     value["model"]["base_checkpoint"] = str(base)
     value["training"]["base_spec"] = str(spec)
+    # The three-image cohort is far below real GRIT minimums, which have their
+    # own tests. This smoke test covers the preparation contracts, so ask the
+    # scorer only for the neighborhood the fixture can actually form.
+    value["actions"]["score"]["settings"].update(settling_k=0, view_ks=[0])
     value["data"].pop("previous_training_manifest")
     value["data"].update({
         "target_manifest": str(outputs["target"]),
