@@ -70,7 +70,10 @@ training:
 
 actions:
   score:
-    # Replace this adapter with the customer's heads and per-sample task losses.
+    # DS ships no multi-task scorer. Replace this placeholder with the customer's
+    # adapter: it scores each target with the customer's task heads and writes
+    # task_scores.parquet, score_commit.json and _SUCCESS. validate rejects the
+    # placeholder. See docs/dinov3_refinement.md, "Multi-task score adapter".
     command: [/path/to/customer_score_adapter, --targets, "{target_manifest}", --checkpoint, "{checkpoint}", --head-config, "{head_config}", --output-dir, "{output_dir}"]
     # List the adapter's complete implementation closure for immutable approval.
     implementation_files: [/path/to/customer_score_adapter]

@@ -271,6 +271,23 @@ def file_identity(path: str | Path, *, role: str | None = None) -> dict[str, Any
     return value
 
 
+def publish_mode(path: str | Path) -> None:
+    """Give a private temporary the mode a plain open() would create.
+
+    mkstemp and NamedTemporaryFile create 0600 files, but published results on a
+    shared results directory must be readable by the platform that collects them.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+        umask = int(re.search(r"^Umask:\s*([0-7]+)", status, re.MULTILINE).group(1), 8)
+    except (OSError, AttributeError):
+        # Without /proc, reading the umask means briefly setting it; this path
+        # runs only where /proc is unavailable.
+        umask = os.umask(0o022)
+        os.umask(umask)
+    os.chmod(path, 0o666 & ~umask)
+
+
 @contextmanager
 def atomic_path(path: str | Path) -> Iterator[Path]:
     """Publish one durably synced file using a private same-directory temporary."""
@@ -284,6 +301,7 @@ def atomic_path(path: str | Path) -> Iterator[Path]:
         yield temporary
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
+        publish_mode(temporary)
         temporary.replace(destination)
         descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -307,6 +325,7 @@ def write_json_atomic(path: str | Path, value: Any) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(destination)
         directory = os.open(destination.parent, os.O_RDONLY)
         try:
@@ -331,6 +350,7 @@ def write_text_atomic(path: str | Path, value: str) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(destination)
         directory = os.open(destination.parent, os.O_RDONLY)
         try:

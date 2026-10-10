@@ -28,6 +28,19 @@ def _midrank_ecdf(values: pd.Series) -> pd.Series:
     return (values.rank(method="average") - 0.5) / len(values)
 
 
+def _largest_remainder(weights: Mapping[str, float], total: int) -> dict[str, int]:
+    """Split ``total`` in proportion to ``weights``, deterministically."""
+    ordered = sorted(weights)
+    weight_sum = sum(weights.values())
+    exact = {task: total * weights[task] / weight_sum for task in ordered}
+    budgets = {task: int(math.floor(exact[task])) for task in ordered}
+    for task in sorted(ordered, key=lambda item: (-(exact[item] % 1.0), item))[
+        : total - sum(budgets.values())
+    ]:
+        budgets[task] += 1
+    return budgets
+
+
 def allocate_multitask_budgets(
     tasks: list[str],
     *,
@@ -52,13 +65,7 @@ def allocate_multitask_budgets(
     ):
         raise ValueError("task weights must be finite and positive")
 
-    weight_sum = sum(weights.values())
-    exact = {task: total * weights[task] / weight_sum for task in ordered}
-    budgets = {task: int(math.floor(exact[task])) for task in ordered}
-    for task in sorted(ordered, key=lambda item: (-(exact[item] % 1.0), item))[
-        : total - sum(budgets.values())
-    ]:
-        budgets[task] += 1
+    budgets = _largest_remainder(weights, total)
 
     # A configured task remains represented even under an extreme preference.
     for task in ordered:
@@ -121,7 +128,9 @@ def select_multitask_targets(
     advances one pick per active task per cycle, scanning past identities that
     another task already claimed. Task ordering and ties are stable, making
     resumes reproducible without allowing the first task to consume its entire
-    budget before the others receive a pick.
+    budget before the others receive a pick. With ``total`` and without
+    ``preserve_unfilled_budget``, quota that a task cannot fill goes to tasks
+    with candidates left, split by weight.
     """
     if (per_task is None) == (total is None):
         raise ValueError("configure exactly one of per_task or total")
@@ -184,29 +193,48 @@ def select_multitask_targets(
     positions = {task: 0 for task in ranked_by_task}
     counts = {task: 0 for task in ranked_by_task}
     used: set[str] = set()
+
+    def take(task: str) -> bool:
+        """Select the task's next globally unused target, if any remains."""
+        ranked = ranked_by_task[task]
+        while positions[task] < len(ranked):
+            row = ranked.iloc[positions[task]].copy()
+            positions[task] += 1
+            if str(row["sample_id"]) in used:
+                continue
+            counts[task] += 1
+            row["target_rank"] = counts[task]
+            row["strategy"] = "multi_task_round_robin"
+            row["task"] = task
+            selected_rows.append(row)
+            used.add(str(row["sample_id"]))
+            return True
+        return False
+
+    def remaining(task: str) -> bool:
+        return positions[task] < len(ranked_by_task[task])
+
     active = list(ranked_by_task)
     while active:
-        next_active = []
         for task in active:
-            ranked = ranked_by_task[task]
-            position = positions[task]
-            while position < len(ranked):
-                row = ranked.iloc[position].copy()
-                position += 1
-                sample_id = str(row["sample_id"])
-                if sample_id in used:
-                    continue
-                counts[task] += 1
-                row["target_rank"] = counts[task]
-                row["strategy"] = "multi_task_round_robin"
-                row["task"] = task
-                selected_rows.append(row)
-                used.add(sample_id)
+            take(task)
+        active = [task for task in active if counts[task] < budgets[task] and remaining(task)]
+    if not preserve_unfilled_budget and per_task is None:
+        # Quota a task could not fill goes to tasks with candidates left, split by
+        # weight. per_task stays a per-task cap.
+        while (spare := total_budget - len(selected_rows)) > 0:
+            open_tasks = [task for task in ranked_by_task if remaining(task)]
+            if not open_tasks:
                 break
-            positions[task] = position
-            if counts[task] < budgets[task] and position < len(ranked):
-                next_active.append(task)
-        active = next_active
+            extra = _largest_remainder(
+                {task: (active_weights or {}).get(task, 1.0) for task in open_tasks}, spare
+            )
+            goal = {task: counts[task] + extra[task] for task in open_tasks}
+            active = [task for task in open_tasks if extra[task]]
+            while active:
+                for task in active:
+                    take(task)
+                active = [task for task in active if counts[task] < goal[task] and remaining(task)]
     if not selected_rows:
         empty = scored.head(0).copy()
         empty["target_rank"] = pd.Series(dtype="int64")

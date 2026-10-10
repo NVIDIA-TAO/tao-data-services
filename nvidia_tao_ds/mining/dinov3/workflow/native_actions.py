@@ -18,7 +18,7 @@ from typing import Any
 from omegaconf import OmegaConf
 import pyarrow.parquet as pq
 
-from ..contracts import canonical_digest, write_json_atomic
+from ..contracts import canonical_digest, publish_mode, write_json_atomic
 from .snapshots import file_sha256
 
 
@@ -80,6 +80,7 @@ def _write_yaml_atomic(path: Path, config) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
@@ -102,6 +103,7 @@ def _write_text_atomic(path: Path, value: str) -> Path:
         os.fsync(stream.fileno())
         temporary = Path(stream.name)
     try:
+        publish_mode(temporary)
         temporary.replace(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
@@ -111,6 +113,38 @@ def _write_text_atomic(path: Path, value: str) -> Path:
     finally:
         temporary.unlink(missing_ok=True)
     return path
+
+
+def _grit_config(spec):
+    """Return the runtime's GRIT section; older TAO runtimes cannot score."""
+    if "grit_score" not in spec:
+        raise RuntimeError(
+            "The installed TAO DINOv3 runtime has no grit_score config; "
+            "this image cannot run built-in GRIT scoring"
+        )
+    return spec.grit_score
+
+
+def grit_cohort_minimums(base_spec: str | Path, settings: dict[str, Any]) -> tuple[int, int]:
+    """Return the reference and query counts each GRIT task must exceed.
+
+    Values come from the composed spec plus ``actions.score.settings``, as the
+    scorer will see them. The scorer accepts only a 512-pixel input size.
+    """
+    _, spec = _experiment_spec(base_spec)
+    defaults = _grit_config(spec)
+    unknown = set(settings).difference(defaults.keys())
+    if unknown:
+        raise ValueError(f"Unknown native DINOv3 GRIT settings: {sorted(unknown)}")
+    grit = OmegaConf.merge(defaults, settings)
+    # Mirror the scorer's own checks (tao-pytorch grit_pipeline._validate_grit_cohorts).
+    if not grit.view_ks or any(int(k) <= 0 for k in grit.view_ks):
+        raise ValueError("GRIT view_ks must be a non-empty sequence of positive integers")
+    if int(grit.settling_k) <= 0:
+        raise ValueError(f"GRIT settling_k must be positive, got {grit.settling_k}")
+    if int(grit.input_size) != 512:
+        raise ValueError(f"GRIT input_size must be 512, got {grit.input_size}")
+    return int(grit.settling_k), max(map(int, grit.view_ks))
 
 
 def build_grit_spec(
@@ -123,6 +157,7 @@ def build_grit_spec(
 ) -> Path:
     """Write a complete native ``dinov3 grit_score`` experiment spec."""
     base_path, spec = _experiment_spec(base_spec)
+    _grit_config(spec)
     output = Path(output_dir).resolve()
     spec.results_dir = str(output)
     spec.grit_score.results_dir = str(output)
