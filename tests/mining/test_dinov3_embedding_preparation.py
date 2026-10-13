@@ -157,6 +157,11 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
             if error.name != module:
                 raise
             deft_runtime_unavailable(f"CLIP producer smoke requires {module}")
+    from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig
+    from omegaconf import OmegaConf
+
+    if "grit_score" not in OmegaConf.structured(ExperimentConfig()):
+        deft_runtime_unavailable("CLIP producer smoke validates a GRIT run; the TAO runtime has no grit_score")
     from PIL import Image
     import torch
     import yaml
@@ -187,14 +192,14 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
     outputs = {}
     for population in ("source", "target"):
         paths = []
-        for index, color in enumerate(((200, 40, 20), (30, 170, 90), (50, 20, 180))):
+        for index, color in enumerate(((200, 40, 20), (30, 170, 90), (50, 20, 180), (120, 120, 40))):
             path = payload_root / f"{population}-{index}.png"
             Image.new("RGB", (24, 24), color).save(path)
             paths.append(str(path))
         frame = pd.DataFrame({
-            "filepath": paths, "path": paths, "storage_type": ["file"] * 3,
-            "sample_id": [f"{population}-{i}" for i in range(3)],
-            "task": ["dummy"] * 3, "role": ["query", "reference", "reference"],
+            "filepath": paths, "path": paths, "storage_type": ["file"] * 4,
+            "sample_id": [f"{population}-{i}" for i in range(4)],
+            "task": ["dummy"] * 4, "role": ["query", "query", "reference", "reference"],
         })
         input_path = tmp_path / f"{population}-input.parquet"
         frame.to_parquet(input_path, index=False)
@@ -204,7 +209,7 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
              "model=CLIP", f"model_path={snapshot}", "batch_size=2", f"hydra.run.dir={tmp_path}/hydra-{population}")
         actual = pd.read_parquet(output)
         pd.testing.assert_frame_equal(actual[frame.columns], frame)
-        assert len(actual) == 3
+        assert len(actual) == 4
         assert all(len(vector) == 8 for vector in actual.embedding)
         outputs[population] = output
     payload_contract = tmp_path / "payload.json"
@@ -223,7 +228,7 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
     contract = tmp_path / "contract/target_embedding_contract.json"
     source = json.loads(source_manifest.read_text())
     _validated_query_contract(str(contract), source)
-    assert _target_identity_set(outputs["target"], "grit_score", 8) == {("target-0", "dummy")}
+    assert _target_identity_set(outputs["target"], "grit_score", 8) == {("target-0", "dummy"), ("target-1", "dummy")}
     _run(module, "exact-search", "--queries", outputs["target"],
          "--source-part", outputs["source"],
          "--source-store-manifest", source_manifest, "--query-embedding-contract", contract,
@@ -231,8 +236,8 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
     assert (tmp_path / "search/_SUCCESS").is_file()
     neighbors = pd.read_parquet(tmp_path / "search/neighbors.parquet")
     assert not neighbors.empty
-    assert set(neighbors.sample_id) <= {f"source-{i}" for i in range(3)}
-    assert set(neighbors.query_id) <= {f"target-{i}" for i in range(3)}
+    assert set(neighbors.sample_id) <= {f"source-{i}" for i in range(4)}
+    assert set(neighbors.query_id) <= {f"target-{i}" for i in range(4)}
     assert neighbors.cosine_similarity.between(-1, 1).all()
     assert set(neighbors.source_inventory_digest) == {source["inventory_digest"]}
     workflow_module = "nvidia_tao_ds.mining.dinov3.workflow"
@@ -253,6 +258,8 @@ def test_shipped_clip_producer_to_registered_store_and_target_contract(tmp_path,
         "target_embedding_contract": str(contract),
     })
     value["output"]["run_dir"] = str(tmp_path / "run")
+    # Two queries and two references: the smallest cohort that GRIT can score.
+    value["actions"]["score"]["settings"].update(settling_k=1, view_ks=[1])
     run_config.write_text(yaml.safe_dump(value))
     result = _run(workflow_module, "validate", run_config)
     assert json.loads(result.stdout)["valid"] is True
