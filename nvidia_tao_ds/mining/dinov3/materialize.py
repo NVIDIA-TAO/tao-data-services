@@ -17,6 +17,7 @@ from .contracts import (
     ArtifactManifest,
     file_identity,
     file_sha256,
+    publish_mode,
     require_uncommitted_output,
 )
 
@@ -82,8 +83,11 @@ def _balanced_training_view(
     """Repeat minority provenance groups while retaining every unique sample."""
     if balance_column not in cumulative:
         raise ValueError(f"Training manifest has no {balance_column!r} column")
-    if cumulative[balance_column].isnull().any():
-        raise ValueError("Balanced training provenance contains null values")
+    # Delta rows always carry provenance; only parent-history rows can lack it.
+    # Train on those once instead of inventing a task for them.
+    unattributed = cumulative.loc[cumulative[balance_column].isnull()].copy()
+    unattributed["replay_repeat"] = 0
+    cumulative = cumulative.loc[cumulative[balance_column].notna()]
     tasks = cumulative[balance_column].astype(str)
     groups = {
         task: cumulative.loc[tasks == task].sort_values(
@@ -91,17 +95,8 @@ def _balanced_training_view(
         )
         for task in sorted(tasks.unique())
     }
-    if not groups:
-        empty = cumulative.copy()
-        empty["replay_repeat"] = pd.Series(dtype="int64")
-        return empty, {
-            "column": balance_column,
-            "policy": "oversample_each_task_to_largest_group_v1",
-            "source_rows_by_task": {},
-            "training_rows_by_task": {},
-        }
-    target_rows = max(len(group) for group in groups.values())
-    parts = []
+    target_rows = max((len(group) for group in groups.values()), default=0)
+    parts = [unattributed]
     for task, group in groups.items():
         original = group.copy()
         original["replay_repeat"] = 0
@@ -115,6 +110,7 @@ def _balanced_training_view(
             ]
             parts.append(repeated)
     view = pd.concat(parts, ignore_index=True, sort=False)
+    view["replay_repeat"] = view["replay_repeat"].astype("int64")
     return view, {
         "column": balance_column,
         "policy": "oversample_each_task_to_largest_group_v1",
@@ -122,6 +118,7 @@ def _balanced_training_view(
             task: int(len(group)) for task, group in groups.items()
         },
         "training_rows_by_task": {task: int(target_rows) for task in groups},
+        "unattributed_rows": int(len(unattributed)),
     }
 
 
@@ -267,6 +264,7 @@ def materialize_manifest(
     ) as stream:
         temporary = Path(stream.name)
     cumulative.to_parquet(temporary, index=False)
+    publish_mode(temporary)
     file_publications = [(temporary, manifest_path)]
     training_view = None
     balance = None
@@ -284,6 +282,7 @@ def materialize_manifest(
         ) as stream:
             view_temporary = Path(stream.name)
         training_view.to_parquet(view_temporary, index=False)
+        publish_mode(view_temporary)
         file_publications.append((view_temporary, view_path))
     payload = {
         "manifest_uri": manifest_path.resolve().as_uri(),
