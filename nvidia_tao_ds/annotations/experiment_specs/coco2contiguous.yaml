@@ -1,6 +1,0 @@
-data:
-  input_format: "COCO"
-  output_format: "COCO"
-coco:
-  ann_file: ???
-results_dir: ???

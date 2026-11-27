@@ -1,6 +1,0 @@
-apply_correction: True
-data:
-  input_format: "COCO"
-  image_dir: ???
-  ann_path: ???
-workers: 36

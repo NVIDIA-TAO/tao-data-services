@@ -1,6 +1,0 @@
-data:
-  input_format: "ODVG"
-  output_format: "COCO"
-odvg:
-  ann_file: ???
-  labelmap_file: ???

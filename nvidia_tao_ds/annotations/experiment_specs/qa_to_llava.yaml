@@ -1,3 +1,0 @@
-results_dir: ???
-input_jsonl: ""           # Path to JSONL with {"id": "...", "video_path": "...", "question": "...", "answer": "..."} per line
-output_file: "llava_annotations.json"

@@ -1,8 +1,0 @@
-data:
-  annotations:
-    - /datasets/part_0.json
-    - /datasets/part_1.json
-    - /datasets/part_2.json
-    - /datasets/part_3.json
-    - /datasets/part_4.json
-results_dir: /results_dir
